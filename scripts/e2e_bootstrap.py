@@ -16,7 +16,7 @@ REQUIRED_PERMISSIONS = [
     "asset.download",
     "asset.upload",
     "album.read",
-    "album.write",
+    "album.create",
     "albumAsset.create",
 ]
 

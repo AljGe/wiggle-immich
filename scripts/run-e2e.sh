@@ -71,14 +71,25 @@ fi
 
 cd "$ROOT"
 
+if [[ "${RESET_TEST_DATA:-1}" == "1" && -d "$DOCKER_DIR/test-data" ]]; then
+  echo "==> Resetting docker/test-data for a clean Immich instance"
+  docker run --rm -v "$DOCKER_DIR/test-data:/data" alpine:3.20 sh -c 'rm -rf /data/* /data/.[!.]* /data/..?*' 2>/dev/null \
+    || rm -rf "$DOCKER_DIR/test-data" 2>/dev/null \
+    || sudo rm -rf "$DOCKER_DIR/test-data"
+fi
+
 echo "==> Generating synthetic wiggle burst fixtures"
 "$PYTHON" scripts/generate_fixtures.py "$FIXTURES_DIR"
 
 echo "==> Starting isolated Immich test stack"
-docker compose --env-file "$DOCKER_DIR/immich.env" \
+if ! docker compose --env-file "$DOCKER_DIR/immich.env" \
   -f "$DOCKER_DIR/compose.test.yml" \
   --project-directory "$DOCKER_DIR" \
-  up -d --wait
+  up -d --wait; then
+  echo "ERROR: Immich stack failed to start. Recent server logs:" >&2
+  docker logs image_helper_immich_server 2>&1 | tail -40 >&2 || true
+  exit 1
+fi
 
 cleanup() {
   if [[ "${KEEP_STACK:-0}" != "1" ]]; then

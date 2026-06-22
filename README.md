@@ -14,7 +14,7 @@ Detection defaults to **dry-run** so you can tune the threshold before uploading
 
 - Python 3.11+
 - A running Immich instance (v2 or v3)
-- API key with permissions: `asset.read`, `asset.download`, `asset.upload`, `album.read`, `album.write`
+- API key with permissions: `asset.read`, `asset.download`, `asset.upload`, `album.read`, `album.create`, `albumAsset.create`
 
 ## Setup
 
