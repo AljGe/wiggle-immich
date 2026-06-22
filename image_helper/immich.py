@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
@@ -115,6 +116,28 @@ class ImmichClient:
         )
         assets.sort(key=lambda asset: asset["localDateTime"])
         return assets
+
+    def get_asset(self, asset_id: str) -> dict[str, Any]:
+        response = self._request("GET", f"/assets/{asset_id}")
+        return response.json()
+
+    def wait_for_thumbnail(
+        self,
+        asset_id: str,
+        *,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
+    ) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            response = self._client.get(
+                f"/assets/{asset_id}/thumbnail",
+                params={"size": "preview"},
+            )
+            if response.status_code == 200 and response.content:
+                return
+            time.sleep(poll_interval)
+        raise ImmichError(f"Thumbnail not ready for {asset_id} within {timeout}s")
 
     def download_thumbnail(self, asset_id: str, *, size: str = "preview") -> bytes:
         response = self._request(

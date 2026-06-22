@@ -1,0 +1,18 @@
+{
+  "name": "image-helper wigglegram",
+  "description": "Trigger image-helper wigglegram export on new assets",
+  "enabled": true,
+  "trigger": "AssetCreate",
+  "steps": [
+    {
+      "method": "${WEBHOOK_METHOD}",
+      "config": {
+        "url": "${WEBHOOK_URL}",
+        "headers": {
+          "x-immich-webhook-secret": "${WEBHOOK_SECRET}"
+        }
+      },
+      "enabled": true
+    }
+  ]
+}

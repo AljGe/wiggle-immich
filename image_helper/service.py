@@ -116,23 +116,45 @@ def export_groups(
     return summary
 
 
-def process_webhook_asset(
+def resolve_webhook_asset(client: ImmichClient, asset: dict) -> tuple[dict, bool]:
+    if asset.get("localDateTime"):
+        return asset, False
+
+    asset_id = asset["id"]
+    full_asset = client.get_asset(asset_id)
+    return full_asset, True
+
+
+def process_webhook_asset_id(
     settings: Settings,
     store: HashStore,
-    asset: dict,
-) -> dict[str, int | bool]:
-    asset_id = asset["id"]
-
+    asset_id: str,
+    *,
+    raw_asset: dict | None = None,
+    trigger: str | None = None,
+) -> dict[str, int | bool | str | None]:
     with ImmichClient(settings.immich_base_url, settings.immich_api_key) as client:
+        asset = raw_asset or {"id": asset_id}
+        asset, resolved = resolve_webhook_asset(client, asset)
+        client.wait_for_thumbnail(asset_id)
+
         neighbors = client.search_neighbors(
             parse_local_datetime(asset["localDateTime"]),
             window_seconds=max(settings.wiggle_time_window_seconds * 4, 30),
         )
 
+        batch: list[AssetRecord] = []
         indexed_any = False
         for neighbor in neighbors:
-            if index_asset(client, store, neighbor):
-                indexed_any = True
+            record = prepare_index_record(client, store, neighbor)
+            if record is None:
+                continue
+            batch.append(record)
+            if len(batch) >= INDEX_BATCH_SIZE:
+                if flush_index_batch(store, batch) > 0:
+                    indexed_any = True
+        if flush_index_batch(store, batch) > 0:
+            indexed_any = True
 
         groups = detect_groups(settings, store)
         relevant = [
@@ -148,7 +170,22 @@ def process_webhook_asset(
             exported = summary.exported
 
     return {
+        "trigger": trigger,
+        "resolved_asset": resolved,
         "indexed_neighbors": indexed_any,
         "groups_found": len(relevant),
         "exported": exported,
     }
+
+
+def process_webhook_asset(
+    settings: Settings,
+    store: HashStore,
+    asset: dict,
+) -> dict[str, int | bool | str | None]:
+    return process_webhook_asset_id(
+        settings,
+        store,
+        asset["id"],
+        raw_asset=asset,
+    )

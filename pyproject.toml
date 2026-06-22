@@ -38,7 +38,23 @@ packages = ["image_helper"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "fastapi>=0.111.0",
+    "httpx>=0.27.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    "docker",
+    "testdata",
+    "test-data",
+    "build",
+    "dist",
+    "*.egg",
+]
+addopts = [
+    "--import-mode=importlib",
+    "--ignore=docker/test-data",
+]

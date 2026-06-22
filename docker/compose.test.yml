@@ -84,6 +84,33 @@ services:
     profiles:
       - helper
 
+  image-helper-webhook:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.webhook
+    container_name: image_helper_webhook
+    env_file:
+      - test.runtime.env
+    environment:
+      IMMICH_URL: http://immich-server:2283/api
+      HASH_DB_PATH: /data/hashes.sqlite3
+      WEBHOOK_SECRET: image-helper-e2e-secret
+      WEBHOOK_HOST: 0.0.0.0
+      WEBHOOK_PORT: 8765
+    volumes:
+      - helper-data:/data
+    depends_on:
+      immich-server:
+        condition: service_healthy
+    profiles:
+      - workflow-e2e
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
 volumes:
   model-cache:
   helper-data:

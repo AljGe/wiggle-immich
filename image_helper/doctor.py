@@ -13,7 +13,7 @@ REQUIRED_PERMISSIONS = [
 ]
 
 
-def run_doctor(base_url: str, api_key: str) -> dict[str, object]:
+def run_doctor(base_url: str, api_key: str, *, check_workflows: bool = False) -> dict[str, object]:
     base_url = base_url.rstrip("/")
     headers = {
         "x-api-key": api_key,
@@ -24,6 +24,9 @@ def run_doctor(base_url: str, api_key: str) -> dict[str, object]:
         "auth_ok": False,
         "permissions_ok": False,
         "missing_permissions": [],
+        "workflows_available": None,
+        "workflows_webhook_method": None,
+        "wigglegram_workflow_enabled": None,
         "error": None,
     }
 
@@ -48,6 +51,30 @@ def run_doctor(base_url: str, api_key: str) -> dict[str, object]:
             result["permissions_ok"] = not missing
             if missing:
                 result["error"] = "API key is missing required permissions"
+
+            if check_workflows:
+                from image_helper.immich_workflows import (
+                    find_wigglegram_workflow,
+                    list_workflows,
+                    probe_workflows,
+                )
+
+                probe = probe_workflows(base_url, api_key=api_key)
+                result["workflows_available"] = probe.available
+                result["workflows_webhook_method"] = probe.webhook_method
+                if probe.error and not probe.available and result["error"] is None:
+                    result["error"] = probe.error
+                elif probe.available:
+                    try:
+                        workflows = list_workflows(base_url, api_key=api_key)
+                        workflow = find_wigglegram_workflow(workflows)
+                        result["wigglegram_workflow_enabled"] = bool(
+                            workflow and workflow.get("enabled")
+                        )
+                    except httpx.HTTPError as exc:
+                        result["wigglegram_workflow_enabled"] = False
+                        result["error"] = f"Workflow list failed: {exc}"
+
             return result
     except httpx.HTTPError as exc:
         result["error"] = str(exc)

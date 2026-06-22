@@ -157,13 +157,19 @@ Hash data persists in the `helper-data` volume.
 ### Fast unit tests (no Docker)
 
 ```bash
+# From repository root (recommended)
 uv sync --group dev
 uv run pytest
+
+# Or use the helper script from any directory
+./scripts/test.sh
 ```
 
-These cover detector logic, configuration, and doctor checks without Immich.
+These cover detector logic, configuration, workflow payload parsing, and webhook handler behavior without Immich.
 
-### Full contained E2E (Docker + Immich)
+If you previously ran E2E from `docker/`, note that Docker may leave a root-owned `docker/test-data/` directory. Run `pytest` from the repo root (or `./scripts/test.sh`) — not from `docker/`.
+
+### REST pipeline E2E (Docker + Immich `release`)
 
 This spins up an isolated Immich stack, uploads synthetic wiggle burst frames, runs the full `index → detect → export` pipeline, and verifies the GIF lands in the `Wigglegrams` album.
 
@@ -184,6 +190,30 @@ KEEP_STACK=1 ./scripts/run-e2e.sh
 3. `scripts/e2e_bootstrap.py` — creates admin, API key, uploads fixtures, waits for thumbnails
 4. `image-helper` container — runs index/detect/export against `http://immich-server:2283/api`
 5. `scripts/e2e_verify.py` — asserts GIF exists in the `Wigglegrams` album
+
+### Workflow preview E2E (Docker + Immich preview + webhook)
+
+Exercises the full `AssetCreate` workflow → webhook → wigglegram path. Uses a preview Immich tag by default.
+
+```bash
+# Preview Immich (default: next) + image-helper webhook daemon
+./scripts/run-e2e-workflow.sh
+
+# Pin a specific preview build
+IMMICH_WORKFLOW_VERSION=next ./scripts/run-e2e-workflow.sh
+
+# Debug workflow method discovery
+WORKFLOW_DEBUG=1 ./scripts/run-e2e-workflow.sh
+```
+
+**What it does:**
+
+1. Starts Immich with `IMMICH_WORKFLOW_VERSION` (default `next`)
+2. Starts `image-helper-webhook` (`docker/Dockerfile.webhook`)
+3. `scripts/e2e_workflow_bootstrap.py` — discovers webhook step, installs workflow, uploads fixtures sequentially
+4. Waits for async export and verifies with `scripts/e2e_verify.py`
+
+This test may break when Immich changes workflow plugin schemas. Use `image-helper doctor --workflows` to inspect availability on your instance.
 
 **Manual steps** (if you prefer step-by-step):
 
@@ -207,16 +237,41 @@ docker compose --env-file docker/immich.env \
 
 Test data is stored under `docker/test-data/` and removed on teardown (`docker compose down -v`).
 
-## Phase 2: native Immich workflow webhook
+## Immich workflow integration
 
-When Immich merges the webhook workflow step, enable the receiver:
+Run the webhook receiver and install a workflow that POSTs on `AssetCreate`:
 
 ```bash
 uv sync --extra webhook
 image-helper webhook
 ```
 
-Configure an Immich workflow template to POST to `http://<helper-host>:8765/webhook/immich` with optional `x-immich-webhook-secret` header matching `WEBHOOK_SECRET`.
+Install the workflow via API (requires admin credentials once):
+
+```bash
+export IMMICH_ADMIN_EMAIL=you@example.com
+export IMMICH_ADMIN_PASSWORD=...
+image-helper immich install-workflow \
+  --webhook-url http://<helper-host>:8765/webhook/immich
+```
+
+Set `WEBHOOK_SECRET` in your env and configure the same value in the workflow step header `x-immich-webhook-secret`.
+
+Check workflow support on your Immich build:
+
+```bash
+image-helper doctor --workflows
+```
+
+### Webhook payload contract
+
+The receiver accepts JSON payloads with an `asset` object. Supported shapes:
+
+- `{ "trigger": "AssetCreate", "asset": { "id": "..." } }`
+- `{ "asset": { "id": "..." } }`
+- `{ "type": "AssetCreationEvent", "asset": { "id": "..." } }`
+
+If `localDateTime` is missing, image-helper fetches the asset from Immich and waits for thumbnails before indexing.
 
 ## Architecture
 
@@ -226,7 +281,7 @@ Immich (REST API)  <->  image-helper  <->  SQLite hash store
                          GIF upload + album
 ```
 
-Heavy image work stays in this helper; Immich workflows can trigger it via webhook in Phase 2.
+Heavy image work stays in this helper; Immich workflows can trigger it via webhook.
 
 ## License
 

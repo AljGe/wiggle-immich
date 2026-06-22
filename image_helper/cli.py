@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 import sys
 import time
@@ -22,6 +23,11 @@ from image_helper.config import (
     resolve_env_file,
 )
 from image_helper.doctor import REQUIRED_PERMISSIONS, run_doctor
+from image_helper.immich_workflows import (
+    discover_webhook_method,
+    ensure_wigglegram_workflow,
+    probe_workflows,
+)
 from image_helper.hashstore import HashStore
 from image_helper.immich import ImmichClient, ImmichError
 from image_helper.models import AssetRecord, WiggleGroup
@@ -39,7 +45,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 config_app = typer.Typer(help="Inspect and initialize configuration.")
+immich_app = typer.Typer(help="Immich workflow integration.")
 app.add_typer(config_app, name="config")
+app.add_typer(immich_app, name="immich")
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -213,12 +221,19 @@ def config_show(ctx: typer.Context) -> None:
 
 
 @app.command()
-def doctor(ctx: typer.Context) -> None:
+def doctor(
+    ctx: typer.Context,
+    workflows: bool = typer.Option(False, "--workflows", help="Also check Immich workflows API."),
+) -> None:
     """Verify Immich connectivity and API key permissions."""
     settings = _require_settings(ctx)
     console.print(f"Checking Immich at {settings.immich_base_url} ...")
 
-    result = run_doctor(settings.immich_base_url, settings.immich_api_key)
+    result = run_doctor(
+        settings.immich_base_url,
+        settings.immich_api_key,
+        check_workflows=workflows,
+    )
     checks = Table(title="Doctor")
     checks.add_column("Check")
     checks.add_column("Status")
@@ -226,6 +241,18 @@ def doctor(ctx: typer.Context) -> None:
     checks.add_row("Server ping", "ok" if result["ping_ok"] else "failed")
     checks.add_row("API key auth", "ok" if result["auth_ok"] else "failed")
     checks.add_row("Permissions", "ok" if result["permissions_ok"] else "failed")
+    if workflows:
+        checks.add_row(
+            "Workflows API",
+            "ok" if result.get("workflows_available") else "unavailable",
+        )
+        method = result.get("workflows_webhook_method")
+        checks.add_row("Webhook step", method or "not discovered")
+        enabled = result.get("wigglegram_workflow_enabled")
+        if enabled is None:
+            checks.add_row("Wigglegram workflow", "unknown")
+        else:
+            checks.add_row("Wigglegram workflow", "enabled" if enabled else "missing/disabled")
     console.print(checks)
 
     if result["missing_permissions"]:
@@ -236,11 +263,85 @@ def doctor(ctx: typer.Context) -> None:
         for permission in REQUIRED_PERMISSIONS:
             console.print(f"  - {permission}")
 
-    if result["error"]:
+    core_ok = bool(result["ping_ok"] and result["auth_ok"] and result["permissions_ok"])
+    if result["error"] and not core_ok:
         console.print(f"[red]{result['error']}[/red]")
         raise typer.Exit(code=1)
 
-    console.print("[green]All checks passed.[/green]")
+    if workflows and not result.get("workflows_available"):
+        console.print(
+            "[yellow]Workflows API is not available on this Immich build "
+            "(preview/next required).[/yellow]"
+        )
+
+    if core_ok:
+        console.print("[green]All checks passed.[/green]")
+    else:
+        raise typer.Exit(code=1)
+
+
+def _login_admin(base_url: str, email: str, password: str) -> str:
+    import httpx
+
+    response = httpx.post(
+        f"{base_url.rstrip('/')}/auth/login",
+        json={"email": email, "password": password},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()["accessToken"]
+
+
+@immich_app.command("install-workflow")
+def immich_install_workflow(
+    ctx: typer.Context,
+    webhook_url: str = typer.Option(
+        ...,
+        "--webhook-url",
+        help="URL Immich should POST to (e.g. http://image-helper:8765/webhook/immich).",
+    ),
+    admin_email: Optional[str] = typer.Option(
+        None,
+        envvar="IMMICH_ADMIN_EMAIL",
+        help="Admin email for workflow API (or set IMMICH_ADMIN_EMAIL).",
+    ),
+    admin_password: Optional[str] = typer.Option(
+        None,
+        envvar="IMMICH_ADMIN_PASSWORD",
+        help="Admin password for workflow API (or set IMMICH_ADMIN_PASSWORD).",
+    ),
+) -> None:
+    """Create or update the image-helper wigglegram workflow in Immich."""
+    settings = _require_settings(ctx)
+
+    if not admin_email or not admin_password:
+        raise typer.Exit(
+            "Admin credentials required. Set IMMICH_ADMIN_EMAIL and IMMICH_ADMIN_PASSWORD "
+            "or pass --admin-email / --admin-password."
+        )
+
+    probe = probe_workflows(settings.immich_base_url, api_key=settings.immich_api_key)
+    if not probe.available:
+        raise typer.Exit(f"Workflows API unavailable: {probe.error}")
+
+    token = _login_admin(settings.immich_base_url, admin_email, admin_password)
+    method_info = discover_webhook_method(
+        settings.immich_base_url,
+        access_token=token,
+    )
+    if method_info is None:
+        raise typer.Exit("Could not discover workflow webhook method on this Immich build.")
+
+    workflow_id = ensure_wigglegram_workflow(
+        settings.immich_base_url,
+        access_token=token,
+        webhook_url=webhook_url,
+        secret=settings.webhook_secret,
+        method_info=method_info,
+    )
+    console.print(f"[green]Installed workflow[/green] id={workflow_id}")
+    console.print(f"Webhook method: {method_info.method}")
+    console.print("Enable the workflow in Immich Utilities → Workflows if it is disabled.")
 
 
 @app.command()
@@ -370,7 +471,7 @@ def webhook(
     host: Optional[str] = typer.Option(None, help="Override WEBHOOK_HOST."),
     port: Optional[int] = typer.Option(None, help="Override WEBHOOK_PORT."),
 ) -> None:
-    """Start Phase 2 webhook receiver stub (requires optional [webhook] deps)."""
+    """Start webhook receiver for Immich workflow triggers (requires [webhook] extra)."""
     try:
         from image_helper.webhook import run_webhook_server
     except ImportError as exc:

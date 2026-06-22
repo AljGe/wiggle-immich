@@ -125,19 +125,16 @@ def wait_for_thumbnail(base_url: str, api_key: str, asset_id: str, timeout_secon
     raise TimeoutError(f"Thumbnail not ready for {asset_id}")
 
 
-def write_runtime_env(path: Path, api_key: str) -> None:
-    path.write_text(
-        "\n".join(
-            [
-                f"IMMICH_API_KEY={api_key}",
-                "WIGGLE_THRESHOLD=12",
-                "WIGGLE_TIME_WINDOW_SECONDS=5",
-                "WIGGLE_ALBUM_NAME=Wigglegrams",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+def write_runtime_env(path: Path, api_key: str, *, webhook_secret: str | None = None) -> None:
+    lines = [
+        f"IMMICH_API_KEY={api_key}",
+        "WIGGLE_THRESHOLD=12",
+        "WIGGLE_TIME_WINDOW_SECONDS=5",
+        "WIGGLE_ALBUM_NAME=Wigglegrams",
+    ]
+    if webhook_secret:
+        lines.insert(1, f"WEBHOOK_SECRET={webhook_secret}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"Wrote runtime env to {path}")
 
 
@@ -192,14 +189,27 @@ def main() -> int:
         default=Path("docker/test.runtime.env"),
         help="Path for generated image-helper env file",
     )
+    parser.add_argument(
+        "--setup-only",
+        action="store_true",
+        help="Create admin and API key only; skip fixture upload.",
+    )
+    parser.add_argument(
+        "--webhook-secret",
+        default=None,
+        help="Optional WEBHOOK_SECRET to include in runtime env.",
+    )
     args = parser.parse_args()
 
     wait_for_immich(args.immich_url)
     ensure_admin(args.immich_url, args.admin_email, args.admin_password, args.admin_name)
     token = login(args.immich_url, args.admin_email, args.admin_password)
     api_key = create_api_key(args.immich_url, token, "image-helper-e2e")
+    write_runtime_env(args.runtime_env, api_key, webhook_secret=args.webhook_secret)
+    if args.setup_only:
+        return 0
+
     upload_fixtures(args.immich_url, api_key, args.fixtures_dir)
-    write_runtime_env(args.runtime_env, api_key)
     return 0
 
 
