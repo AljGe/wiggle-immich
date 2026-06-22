@@ -5,7 +5,7 @@ External helper for Immich that detects stereoscopic wiggle sequences (burst-lik
 ## How it works
 
 1. **Index** — downloads Immich thumbnails and stores perceptual hashes (`phash`) in SQLite.
-2. **Detect** — sorts assets by capture time and groups adjacent frames where `0 < phash_distance < threshold` and the time gap is within a configurable window.
+2. **Detect** — builds time-window graph clusters from perceptual hashes (not just consecutive pairs), then validates candidates
 3. **Export** — builds a boomerang GIF from originals, uploads it to Immich, and adds it to a `Wigglegrams` album.
 
 Detection defaults to **dry-run** so you can tune the threshold before uploading anything.
@@ -105,6 +105,11 @@ image-helper config init --output ~/.config/image-helper/env
 | `WIGGLE_EXCLUDE_STACKED` | `true` | Reject groups whose members share an Immich stack |
 | `WIGGLE_MIN_FRAMES` | `2` | Minimum frames required in a group |
 | `WIGGLE_NEIGHBOR_SEARCH_PRIMARY_ONLY` | `false` | Webhook neighbor search: exclude non-primary stacked assets |
+| `WIGGLE_MAX_GAP_FRAMES` | `0` | Allow up to N non-matching frames between wiggle frames |
+| `WIGGLE_SETTLE_SECONDS` | `0` | Wait after last detection before export (burst upload debounce; `0` = off) |
+| `WIGGLE_REQUIRE_BURST_METADATA` | `false` | Require matching EXIF burst UUID on every frame |
+| `WIGGLE_STACK_WITH_SOURCES` | `false` | Stack exported GIF with source frames in Immich |
+| `INDEX_WORKERS` | `4` | Parallel workers for index hashing (`1` = sequential) |
 | `WIGGLE_ALBUM_NAME` | `Wigglegrams` | Target album for exports |
 | `DAEMON_POLL_INTERVAL_SECONDS` | `60` | Daemon poll interval |
 | `WEBHOOK_HOST` | `0.0.0.0` | Webhook bind address |
@@ -152,14 +157,18 @@ docker compose -f docker/compose.yml --project-directory docker up -d --build
 
 Hash data persists in the `helper-data` volume.
 
+For the Docker sidecar, `docker/.env.example` recommends `WIGGLE_HASH_SOURCE=thumbnail` (faster indexing; originals are still downloaded when building GIFs), `WIGGLE_SETTLE_SECONDS=15` (wait for burst uploads to finish), and `WIGGLE_STACK_WITH_SOURCES=true` (stack the GIF with source frames).
+
 ## Threshold tuning
 
 1. Run `image-helper index` on your library.
 2. Run `image-helper detect --show-rejected` and inspect accepted groups plus rejection reasons.
-3. Lower `WIGGLE_THRESHOLD` for stricter matching; raise it if bursts are missed.
-4. Raise `WIGGLE_MIN_DISTANCE` if Immich edits of a single photo still group together.
-5. Lower `WIGGLE_MAX_DIMENSION_DRIFT` if unstacked crop edits slip through.
-6. Adjust `WIGGLE_TIME_WINDOW_SECONDS` if unrelated photos get grouped.
+3. Preview a candidate locally without uploading: `image-helper detect preview -o /tmp/preview.gif --group-index 0`
+4. Lower `WIGGLE_THRESHOLD` for stricter matching; raise it if bursts are missed.
+5. Raise `WIGGLE_MIN_DISTANCE` if Immich edits of a single photo still group together.
+6. Lower `WIGGLE_MAX_DIMENSION_DRIFT` if unstacked crop edits slip through.
+7. Adjust `WIGGLE_TIME_WINDOW_SECONDS` if unrelated photos get grouped.
+8. Raise `WIGGLE_MAX_GAP_FRAMES` if an unrelated frame splits a burst in time order.
 
 After upgrading image-helper with new metadata fields, re-index once:
 

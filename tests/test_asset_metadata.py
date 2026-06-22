@@ -24,9 +24,26 @@ def test_extract_asset_metadata_reads_exif_and_stack() -> None:
     assert metadata["is_primary_in_stack"] is True
 
 
+def test_extract_asset_metadata_reads_burst_fields() -> None:
+    asset = {
+        "id": "asset-2",
+        "exifInfo": {
+            "burstUUID": "burst-abc",
+            "imageNumber": 3,
+        },
+    }
+
+    metadata = extract_asset_metadata(asset)
+
+    assert metadata["burst_id"] == "burst-abc"
+    assert metadata["burst_sequence"] == 3
+
+
 def test_extract_asset_metadata_handles_missing_fields() -> None:
     metadata = extract_asset_metadata({"id": "asset-2"})
     assert metadata["width"] is None
     assert metadata["height"] is None
     assert metadata["stack_id"] is None
     assert metadata["is_primary_in_stack"] is None
+    assert metadata["burst_id"] is None
+    assert metadata["burst_sequence"] is None

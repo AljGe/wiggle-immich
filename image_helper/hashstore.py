@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from PIL import Image
@@ -21,6 +21,8 @@ _ASSET_COLUMNS = (
     "original_file_name",
     "stack_id",
     "is_primary_in_stack",
+    "burst_id",
+    "burst_sequence",
     "indexed_at",
 )
 
@@ -46,6 +48,8 @@ class HashStore:
             ("original_file_name", "TEXT"),
             ("stack_id", "TEXT"),
             ("is_primary_in_stack", "INTEGER"),
+            ("burst_id", "TEXT"),
+            ("burst_sequence", "INTEGER"),
         ]
         for column_name, column_type in migrations:
             if column_name not in existing:
@@ -74,6 +78,12 @@ class HashStore:
                   group_key TEXT PRIMARY KEY,
                   gif_asset_id TEXT NOT NULL,
                   exported_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS pending_wiggle_groups (
+                  group_key TEXT PRIMARY KEY,
+                  first_seen_at TEXT NOT NULL,
+                  last_seen_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS daemon_state (
@@ -116,9 +126,11 @@ class HashStore:
                   original_file_name,
                   stack_id,
                   is_primary_in_stack,
+                  burst_id,
+                  burst_sequence,
                   indexed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asset_id) DO UPDATE SET
                   phash = excluded.phash,
                   local_datetime = excluded.local_datetime,
@@ -128,6 +140,8 @@ class HashStore:
                   original_file_name = excluded.original_file_name,
                   stack_id = excluded.stack_id,
                   is_primary_in_stack = excluded.is_primary_in_stack,
+                  burst_id = excluded.burst_id,
+                  burst_sequence = excluded.burst_sequence,
                   indexed_at = excluded.indexed_at
                 """,
                 rows,
@@ -194,6 +208,10 @@ class HashStore:
                 """,
                 (group_key, gif_asset_id, _utc_now_iso()),
             )
+            conn.execute(
+                "DELETE FROM pending_wiggle_groups WHERE group_key = ?",
+                (group_key,),
+            )
 
     def is_exported(self, group_key: str) -> bool:
         with self._connect() as conn:
@@ -212,6 +230,58 @@ class HashStore:
         if row is None:
             return None
         return row["gif_asset_id"]
+
+    def touch_pending_group(self, group_key: str, *, seen_at: datetime | None = None) -> None:
+        seen = (seen_at or datetime.now(timezone.utc)).isoformat()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO pending_wiggle_groups (group_key, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(group_key) DO UPDATE SET
+                  last_seen_at = excluded.last_seen_at
+                """,
+                (group_key, seen, seen),
+            )
+
+    def list_ready_pending_group_keys(
+        self,
+        *,
+        settle_seconds: float,
+        now: datetime | None = None,
+    ) -> list[str]:
+        if settle_seconds <= 0:
+            return []
+
+        current = now or datetime.now(timezone.utc)
+        cutoff = (current - timedelta(seconds=settle_seconds)).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT group_key
+                FROM pending_wiggle_groups
+                WHERE last_seen_at <= ?
+                ORDER BY last_seen_at ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [row["group_key"] for row in rows]
+
+    def prune_pending_groups(self, active_group_keys: set[str]) -> None:
+        if not active_group_keys:
+            with self._transaction() as conn:
+                conn.execute("DELETE FROM pending_wiggle_groups")
+            return
+
+        placeholders = ", ".join("?" for _ in active_group_keys)
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                DELETE FROM pending_wiggle_groups
+                WHERE group_key NOT IN ({placeholders})
+                """,
+                tuple(active_group_keys),
+            )
 
     def get_daemon_cursor(self) -> datetime | None:
         with self._connect() as conn:
@@ -255,6 +325,8 @@ def _record_to_row(record: AssetRecord, indexed_at: str) -> tuple:
         record.original_file_name,
         record.stack_id,
         primary,
+        record.burst_id,
+        record.burst_sequence,
         indexed_at,
     )
 
@@ -272,6 +344,8 @@ def _row_to_record(row: sqlite3.Row) -> AssetRecord:
         original_file_name=row["original_file_name"],
         stack_id=row["stack_id"],
         is_primary_in_stack=is_primary,
+        burst_id=row["burst_id"],
+        burst_sequence=row["burst_sequence"],
     )
 
 

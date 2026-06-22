@@ -13,6 +13,28 @@ def _positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _burst_id_from_exif(exif: dict[str, Any]) -> str | None:
+    for key in (
+        "burstUUID",
+        "burstId",
+        "mediaGroupUUID",
+        "MediaGroupUUID",
+        "BurstUUID",
+    ):
+        value = exif.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _burst_sequence_from_exif(exif: dict[str, Any]) -> int | None:
+    for key in ("imageNumber", "sequenceNumber", "burstSequence"):
+        sequence = _positive_int(exif.get(key))
+        if sequence is not None:
+            return sequence
+    return None
+
+
 def extract_asset_metadata(asset: dict[str, Any]) -> dict[str, Any]:
     exif = asset.get("exifInfo") or {}
     width = _positive_int(exif.get("exifImageWidth") or exif.get("imageWidth"))
@@ -36,4 +58,6 @@ def extract_asset_metadata(asset: dict[str, Any]) -> dict[str, Any]:
         "original_file_name": asset.get("originalFileName"),
         "stack_id": stack_id,
         "is_primary_in_stack": is_primary_in_stack,
+        "burst_id": _burst_id_from_exif(exif),
+        "burst_sequence": _burst_sequence_from_exif(exif),
     }

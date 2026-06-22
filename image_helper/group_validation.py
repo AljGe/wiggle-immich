@@ -48,12 +48,31 @@ def _contains_exported_wiggle_asset(assets: tuple[AssetRecord, ...]) -> bool:
     return False
 
 
+def _burst_metadata_issue(assets: tuple[AssetRecord, ...], settings: Settings) -> str | None:
+    burst_ids = [asset.burst_id for asset in assets if asset.burst_id]
+    if settings.wiggle_require_burst_metadata:
+        if len(burst_ids) < len(assets):
+            return "missing burst metadata"
+        if len(set(burst_ids)) > 1:
+            return "mixed burst identifiers"
+        return None
+
+    distinct_burst_ids = {asset.burst_id for asset in assets if asset.burst_id}
+    if len(distinct_burst_ids) > 1:
+        return "mixed burst identifiers"
+    return None
+
+
 def validate_wiggle_group(group: WiggleGroup, settings: Settings) -> str | None:
     if len(group.assets) < settings.wiggle_min_frames:
         return f"fewer than {settings.wiggle_min_frames} frames"
 
     if _contains_exported_wiggle_asset(group.assets):
         return "contains previously exported wiggle asset"
+
+    burst_issue = _burst_metadata_issue(group.assets, settings)
+    if burst_issue is not None:
+        return burst_issue
 
     if settings.wiggle_exclude_stacked and _has_shared_stack(group.assets):
         return "members share an Immich stack"

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from image_helper.asset_metadata import extract_asset_metadata
 from image_helper.config import Settings
 from image_helper.detector import find_wiggle_groups
-from image_helper.exporter import export_wiggle_group
+from image_helper.exporter import export_wiggle_group, make_wigglegram_bytes
 from image_helper.group_validation import RejectedWiggleGroup, partition_wiggle_groups
 from image_helper.hashstore import HashStore, dimensions_from_image_bytes
 from image_helper.immich import ImmichClient, ImmichError, parse_local_datetime
@@ -24,6 +25,14 @@ class ExportSummary:
 class DetectResult:
     accepted: list[WiggleGroup]
     rejected: list[RejectedWiggleGroup]
+
+
+@dataclass
+class IndexSummary:
+    added: int = 0
+    skipped: int = 0
+    errors: int = 0
+    indexed_records: list[AssetRecord] | None = None
 
 
 INDEX_BATCH_SIZE = 50
@@ -86,6 +95,8 @@ def prepare_index_record(
         original_file_name=metadata["original_file_name"],
         stack_id=metadata["stack_id"],
         is_primary_in_stack=metadata["is_primary_in_stack"],
+        burst_id=metadata["burst_id"],
+        burst_sequence=metadata["burst_sequence"],
     )
 
 
@@ -127,6 +138,7 @@ def _find_raw_groups(
         records,
         threshold=settings.wiggle_threshold,
         time_window_seconds=settings.wiggle_time_window_seconds,
+        max_gap_frames=settings.wiggle_max_gap_frames,
     )
 
 
@@ -137,6 +149,34 @@ def detect_groups_with_validation(
     raw_groups = _find_raw_groups(records, settings)
     accepted, rejected = partition_wiggle_groups(raw_groups, settings)
     return DetectResult(accepted=accepted, rejected=rejected)
+
+
+def merge_detect_results(results: list[DetectResult]) -> DetectResult:
+    accepted_by_key: dict[str, WiggleGroup] = {}
+    rejected_by_key: dict[str, RejectedWiggleGroup] = {}
+
+    for result in results:
+        for group in result.accepted:
+            accepted_by_key[group.group_key] = group
+            rejected_by_key.pop(group.group_key, None)
+        for entry in result.rejected:
+            if entry.group.group_key not in accepted_by_key:
+                rejected_by_key[entry.group.group_key] = entry
+
+    accepted = sorted(
+        accepted_by_key.values(),
+        key=lambda group: group.assets[0].local_datetime,
+    )
+    rejected = sorted(
+        rejected_by_key.values(),
+        key=lambda entry: entry.group.assets[0].local_datetime,
+    )
+    return DetectResult(accepted=accepted, rejected=rejected)
+
+
+def detection_window_seconds(settings: Settings, *, window_seconds: float | None = None) -> float:
+    base = window_seconds if window_seconds is not None else settings.wiggle_time_window_seconds
+    return max(base, settings.wiggle_time_window_seconds * 4, 30)
 
 
 def detect_groups(settings: Settings, store: HashStore) -> list[WiggleGroup]:
@@ -154,11 +194,262 @@ def detect_groups_in_range(
     center: datetime,
     window_seconds: float,
 ) -> DetectResult:
-    margin = max(window_seconds, settings.wiggle_time_window_seconds * 4)
+    margin = detection_window_seconds(settings, window_seconds=window_seconds)
     start = center - timedelta(seconds=margin)
     end = center + timedelta(seconds=margin)
     records = store.list_in_range(start, end)
     return detect_groups_with_validation(settings, records)
+
+
+def detect_groups_for_centers(
+    settings: Settings,
+    store: HashStore,
+    centers: list[datetime],
+    *,
+    window_seconds: float | None = None,
+) -> DetectResult:
+    if not centers:
+        return DetectResult(accepted=[], rejected=[])
+
+    margin = detection_window_seconds(settings, window_seconds=window_seconds)
+    results: list[DetectResult] = []
+    for center in centers:
+        results.append(
+            detect_groups_in_range(
+                settings,
+                store,
+                center=center,
+                window_seconds=margin,
+            )
+        )
+    return merge_detect_results(results)
+
+
+def filter_ready_groups(
+    store: HashStore,
+    groups: list[WiggleGroup],
+    *,
+    settle_seconds: float,
+    now: datetime | None = None,
+) -> list[WiggleGroup]:
+    if settle_seconds <= 0:
+        return groups
+
+    ready_keys = set(
+        store.list_ready_pending_group_keys(
+            settle_seconds=settle_seconds,
+            now=now,
+        )
+    )
+    return [group for group in groups if group.group_key in ready_keys]
+
+
+def apply_settle_filter(
+    settings: Settings,
+    store: HashStore,
+    groups: list[WiggleGroup],
+    *,
+    now: datetime | None = None,
+) -> list[WiggleGroup]:
+    if settings.wiggle_settle_seconds <= 0:
+        return groups
+
+    current = now or datetime.now(timezone.utc)
+    active_keys: set[str] = set()
+
+    for group in groups:
+        if store.is_exported(group.group_key):
+            continue
+        active_keys.add(group.group_key)
+        store.touch_pending_group(group.group_key, seen_at=current)
+
+    store.prune_pending_groups(active_keys)
+    return filter_ready_groups(
+        store,
+        groups,
+        settle_seconds=settings.wiggle_settle_seconds,
+        now=current,
+    )
+
+
+def collect_export_candidates(
+    settings: Settings,
+    store: HashStore,
+    groups: list[WiggleGroup],
+    *,
+    now: datetime | None = None,
+) -> list[WiggleGroup]:
+    pending = [group for group in groups if not store.is_exported(group.group_key)]
+    return apply_settle_filter(settings, store, pending, now=now)
+
+
+def index_assets(
+    client: ImmichClient,
+    store: HashStore,
+    assets,
+    *,
+    force: bool = False,
+    hash_source: str = "original",
+    workers: int = 1,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> IndexSummary:
+    asset_list = list(assets)
+    if not asset_list:
+        return IndexSummary(indexed_records=[])
+
+    if workers <= 1:
+        return _index_assets_sequential(
+            client,
+            store,
+            asset_list,
+            force=force,
+            hash_source=hash_source,
+        )
+
+    if base_url is None or api_key is None:
+        base_url = client.base_url
+        api_key = client._client.headers.get("x-api-key", "")
+
+    return _index_assets_parallel(
+        store,
+        asset_list,
+        base_url=base_url,
+        api_key=api_key,
+        force=force,
+        hash_source=hash_source,
+        workers=workers,
+    )
+
+
+def _index_assets_sequential(
+    client: ImmichClient,
+    store: HashStore,
+    assets: list[dict],
+    *,
+    force: bool,
+    hash_source: str,
+) -> IndexSummary:
+    summary = IndexSummary(indexed_records=[])
+    batch: list[AssetRecord] = []
+
+    for asset in assets:
+        try:
+            record = prepare_index_record(
+                client,
+                store,
+                asset,
+                force=force,
+                hash_source=hash_source,
+            )
+            if record is None:
+                summary.skipped += 1
+                continue
+
+            batch.append(record)
+            if len(batch) >= INDEX_BATCH_SIZE:
+                summary.added += flush_index_batch(store, batch)
+        except ImmichError:
+            summary.errors += 1
+
+    summary.added += flush_index_batch(store, batch)
+    if summary.added:
+        summary.indexed_records = _records_for_assets(store, assets)
+    return summary
+
+
+def _index_assets_parallel(
+    store: HashStore,
+    assets: list[dict],
+    *,
+    base_url: str,
+    api_key: str,
+    force: bool,
+    hash_source: str,
+    workers: int,
+) -> IndexSummary:
+    summary = IndexSummary(indexed_records=[])
+    batch: list[AssetRecord] = []
+
+    def _prepare(asset: dict) -> AssetRecord | None:
+        with ImmichClient(base_url, api_key) as worker_client:
+            return prepare_index_record(
+                worker_client,
+                store,
+                asset,
+                force=force,
+                hash_source=hash_source,
+            )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_prepare, asset): asset for asset in assets}
+        for future in as_completed(futures):
+            try:
+                record = future.result()
+            except ImmichError:
+                summary.errors += 1
+                continue
+
+            if record is None:
+                summary.skipped += 1
+                continue
+
+            batch.append(record)
+            if len(batch) >= INDEX_BATCH_SIZE:
+                summary.added += flush_index_batch(store, batch)
+
+    summary.added += flush_index_batch(store, batch)
+    if summary.added:
+        summary.indexed_records = _records_for_assets(store, assets)
+    return summary
+
+
+def _records_for_assets(store: HashStore, assets: list[dict]) -> list[AssetRecord]:
+    records: list[AssetRecord] = []
+    for asset in assets:
+        record = store.get(asset["id"])
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def run_daemon_detection(
+    settings: Settings,
+    store: HashStore,
+    indexed_records: list[AssetRecord],
+) -> DetectResult:
+    if not indexed_records:
+        ready_keys = store.list_ready_pending_group_keys(
+            settle_seconds=settings.wiggle_settle_seconds,
+        )
+        if not ready_keys:
+            return DetectResult(accepted=[], rejected=[])
+
+        all_groups = detect_groups_with_validation(settings, store.list_all()).accepted
+        accepted = [group for group in all_groups if group.group_key in ready_keys]
+        return DetectResult(accepted=accepted, rejected=[])
+
+    centers = [record.local_datetime for record in indexed_records]
+    return detect_groups_for_centers(settings, store, centers)
+
+
+def preview_wiggle_group(
+    settings: Settings,
+    store: HashStore,
+    group: WiggleGroup,
+    *,
+    output_path,
+) -> None:
+    with ImmichClient(settings.immich_base_url, settings.immich_api_key) as client:
+        gif_bytes = make_wigglegram_bytes(
+            client,
+            group,
+            frame_duration_ms=settings.wiggle_frame_duration_ms,
+            max_size=settings.wiggle_max_size,
+            boomerang=settings.wiggle_boomerang,
+            frame_fit=settings.wiggle_frame_fit,
+        )
+    output_path.write_bytes(gif_bytes)
 
 
 def export_groups(
@@ -194,6 +485,11 @@ def export_groups(
                     raise ImmichError(f"Upload response missing asset id: {uploaded}")
 
                 client.add_assets_to_album(album_id, [gif_asset_id])
+
+                if settings.wiggle_stack_with_sources:
+                    source_ids = [asset.asset_id for asset in group.assets]
+                    client.create_stack([gif_asset_id, *source_ids])
+
                 store.mark_exported(group.group_key, gif_asset_id)
                 summary.exported += 1
             except ImmichError:
@@ -224,7 +520,7 @@ def process_webhook_asset_id(
         asset, resolved = resolve_webhook_asset(client, asset)
         client.wait_for_thumbnail(asset_id)
 
-        neighbor_window = max(settings.wiggle_time_window_seconds * 4, 30)
+        neighbor_window = detection_window_seconds(settings)
         with_stacked = (
             False if settings.wiggle_neighbor_search_primary_only else None
         )
@@ -234,23 +530,15 @@ def process_webhook_asset_id(
             with_stacked=with_stacked,
         )
 
-        batch: list[AssetRecord] = []
-        indexed_any = False
-        for neighbor in neighbors:
-            record = prepare_index_record(
-                client,
-                store,
-                neighbor,
-                hash_source=settings.wiggle_hash_source,
-            )
-            if record is None:
-                continue
-            batch.append(record)
-            if len(batch) >= INDEX_BATCH_SIZE:
-                if flush_index_batch(store, batch) > 0:
-                    indexed_any = True
-        if flush_index_batch(store, batch) > 0:
-            indexed_any = True
+        index_summary = index_assets(
+            client,
+            store,
+            neighbors,
+            hash_source=settings.wiggle_hash_source,
+            workers=settings.index_workers,
+            base_url=settings.immich_base_url,
+            api_key=settings.immich_api_key,
+        )
 
         detection = detect_groups_in_range(
             settings,
@@ -263,7 +551,7 @@ def process_webhook_asset_id(
             for group in detection.accepted
             if any(member.asset_id == asset_id for member in group.assets)
         ]
-        pending = [group for group in relevant if not store.is_exported(group.group_key)]
+        pending = collect_export_candidates(settings, store, relevant)
 
         exported = 0
         if pending:
@@ -273,7 +561,7 @@ def process_webhook_asset_id(
     return {
         "trigger": trigger,
         "resolved_asset": resolved,
-        "indexed_neighbors": indexed_any,
+        "indexed_neighbors": bool(index_summary.added),
         "groups_found": len(relevant),
         "exported": exported,
     }

@@ -13,6 +13,8 @@ class AssetRecord:
     original_file_name: str | None = None
     stack_id: str | None = None
     is_primary_in_stack: bool | None = None
+    burst_id: str | None = None
+    burst_sequence: int | None = None
 
 
 @dataclass(frozen=True)

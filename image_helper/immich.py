@@ -213,6 +213,12 @@ class ImmichClient:
                 return album
         return self.create_album(album_name)
 
+    def create_stack(self, asset_ids: list[str]) -> dict[str, Any]:
+        if len(asset_ids) < 2:
+            raise ImmichError("Stack requires at least two asset IDs")
+        response = self._request("POST", "/stacks", json={"assetIds": asset_ids})
+        return response.json()
+
 
 def _to_iso(value: datetime) -> str:
     if value.tzinfo is None:

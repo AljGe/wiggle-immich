@@ -33,12 +33,12 @@ from image_helper.immich import ImmichClient, ImmichError
 from image_helper.group_validation import RejectedWiggleGroup
 from image_helper.models import AssetRecord, WiggleGroup
 from image_helper.service import (
-    INDEX_BATCH_SIZE,
-    detect_groups,
+    collect_export_candidates,
     detect_groups_detailed,
     export_groups,
-    flush_index_batch,
-    prepare_index_record,
+    index_assets,
+    preview_wiggle_group,
+    run_daemon_detection,
 )
 
 app = typer.Typer(
@@ -49,7 +49,11 @@ app = typer.Typer(
 config_app = typer.Typer(help="Inspect and initialize configuration.")
 immich_app = typer.Typer(help="Immich workflow integration.")
 app.add_typer(config_app, name="config")
-app.add_typer(immich_app, name="immich")
+detect_app = typer.Typer(
+    help="Detect wiggle groups from the hash store.",
+    invoke_without_command=True,
+)
+app.add_typer(detect_app, name="detect")
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -157,46 +161,27 @@ def _index_assets(
     client: ImmichClient,
     store: HashStore,
     assets,
+    settings: Settings,
     *,
     force: bool = False,
     verbose: bool = False,
-    hash_source: str = "original",
-) -> tuple[int, int, int]:
-    added = 0
-    skipped = 0
-    errors = 0
-    batch: list[AssetRecord] = []
-
-    for asset in assets:
-        try:
-            record = prepare_index_record(
-                client,
-                store,
-                asset,
-                force=force,
-                hash_source=hash_source,
+) -> tuple[int, int, int, list[AssetRecord]]:
+    summary = index_assets(
+        client,
+        store,
+        assets,
+        force=force,
+        hash_source=settings.wiggle_hash_source,
+        workers=settings.index_workers,
+        base_url=settings.immich_base_url,
+        api_key=settings.immich_api_key,
+    )
+    if verbose and summary.indexed_records:
+        for record in summary.indexed_records:
+            console.print(
+                f"[green]indexed[/green] {record.asset_id} ({record.original_file_name or ''})"
             )
-            if record is None:
-                skipped += 1
-                continue
-
-            batch.append(record)
-            if len(batch) >= INDEX_BATCH_SIZE:
-                added += flush_index_batch(store, batch)
-                if verbose:
-                    console.print(
-                        f"[green]indexed[/green] {asset['id']} ({asset.get('originalFileName', '')})"
-                    )
-            elif verbose:
-                console.print(
-                    f"[green]indexed[/green] {asset['id']} ({asset.get('originalFileName', '')})"
-                )
-        except ImmichError as exc:
-            errors += 1
-            console.print(f"[red]error[/red] {asset['id']}: {exc}")
-
-    added += flush_index_batch(store, batch)
-    return added, skipped, errors
+    return summary.added, summary.skipped, summary.errors, summary.indexed_records or []
 
 
 @config_app.command("init")
@@ -405,13 +390,13 @@ def index(
     store = HashStore(settings.hash_db_path)
 
     with ImmichClient(settings.immich_base_url, settings.immich_api_key) as client:
-        added, skipped, errors = _index_assets(
+        added, skipped, errors, _ = _index_assets(
             client,
             store,
             client.iter_all_images(),
+            settings,
             force=force,
             verbose=verbose,
-            hash_source=settings.wiggle_hash_source,
         )
 
     console.print(
@@ -419,8 +404,8 @@ def index(
     )
 
 
-@app.command()
-def detect(
+@detect_app.callback()
+def detect_cmd(
     ctx: typer.Context,
     dry_run: bool = typer.Option(True, "--dry-run/--upload", help="Report only; use --upload to export."),
     show_rejected: bool = typer.Option(
@@ -444,10 +429,52 @@ def detect(
         console.print("[yellow]Dry run only. Re-run with --upload to export GIFs.[/yellow]")
         return
 
-    summary = export_groups(settings, store, detection.accepted)
+    pending = collect_export_candidates(settings, store, detection.accepted)
+    summary = export_groups(settings, store, pending)
     console.print(
         f"Export complete. exported={summary.exported} skipped={summary.skipped} errors={summary.errors}"
     )
+
+
+@detect_app.command("preview")
+def detect_preview(
+    ctx: typer.Context,
+    output: Path = typer.Option(..., "--output", "-o", help="Write preview GIF to this path."),
+    group_index: int = typer.Option(
+        0,
+        "--group-index",
+        help="Zero-based index of the accepted group to preview.",
+    ),
+    show_rejected: bool = typer.Option(
+        False,
+        "--show-rejected",
+        help="Also list candidate groups rejected by validation rules.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Write a local preview GIF for a detected group without uploading."""
+    _setup_logging(verbose)
+    settings = _require_settings(ctx)
+    store = HashStore(settings.hash_db_path)
+    detection = detect_groups_detailed(settings, store)
+
+    _print_groups(detection.accepted, store=store)
+    if show_rejected:
+        _print_rejected_groups(detection.rejected)
+
+    if not detection.accepted:
+        raise typer.Exit("No accepted wiggle groups to preview.")
+
+    if group_index < 0 or group_index >= len(detection.accepted):
+        raise typer.Exit(
+            f"Group index {group_index} is out of range (0..{len(detection.accepted) - 1})."
+        )
+
+    group = detection.accepted[group_index]
+    output = output.expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    preview_wiggle_group(settings, store, group, output_path=output)
+    console.print(f"[green]Wrote preview GIF[/green] {output}")
 
 
 @app.command(name="export")
@@ -468,7 +495,7 @@ def export_cmd(
     _print_groups(detection.accepted, store=store)
     if show_rejected:
         _print_rejected_groups(detection.rejected)
-    summary = export_groups(settings, store, detection.accepted)
+    summary = export_groups(settings, store, collect_export_candidates(settings, store, detection.accepted))
     console.print(
         f"Export complete. exported={summary.exported} skipped={summary.skipped} errors={summary.errors}"
     )
@@ -494,16 +521,18 @@ def daemon(
         console.print(f"Polling assets updated after {cursor.isoformat()}")
 
         with ImmichClient(settings.immich_base_url, settings.immich_api_key) as client:
-            indexed, _, _ = _index_assets(
+            indexed, _, _, indexed_records = _index_assets(
                 client,
                 store,
                 client.search_images(updated_after=cursor, order="asc"),
-                hash_source=settings.wiggle_hash_source,
+                settings,
             )
 
-        groups = detect_groups(settings, store)
-        pending = [group for group in groups if not store.is_exported(group.group_key)]
-        console.print(f"Indexed {indexed} assets; {len(pending)} new export candidate(s).")
+        detection = run_daemon_detection(settings, store, indexed_records)
+        pending = collect_export_candidates(settings, store, detection.accepted)
+        console.print(
+            f"Indexed {indexed} assets; {len(pending)} export candidate(s) ready."
+        )
 
         if pending:
             summary = export_groups(settings, store, pending)

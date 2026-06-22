@@ -135,6 +135,28 @@ def test_detect_groups_with_validation_filters_false_positives() -> None:
     assert [asset.asset_id for asset in result.rejected[0].group.assets] == ["edit-a", "edit-b"]
 
 
+def test_validate_rejects_missing_burst_metadata_when_required() -> None:
+    seed = "0" * 16
+    group = WiggleGroup(
+        assets=(
+            AssetRecord(
+                asset_id="a",
+                local_datetime=datetime.fromisoformat("2026-01-01T12:00:00+00:00"),
+                phash=seed,
+                burst_id="burst-1",
+            ),
+            AssetRecord(
+                asset_id="b",
+                local_datetime=datetime.fromisoformat("2026-01-01T12:00:01+00:00"),
+                phash=_similar_phash(seed, flips=4),
+            ),
+        ),
+        distances=(4,),
+    )
+    reason = validate_wiggle_group(group, _settings(WIGGLE_REQUIRE_BURST_METADATA=True))
+    assert reason == "missing burst metadata"
+
+
 def test_validate_rejects_exported_wiggle_assets() -> None:
     seed = "0" * 16
     group = WiggleGroup(

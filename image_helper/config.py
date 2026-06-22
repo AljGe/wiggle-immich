@@ -140,6 +140,17 @@ class Settings(BaseSettings):
         default=False,
         alias="WIGGLE_NEIGHBOR_SEARCH_PRIMARY_ONLY",
     )
+    wiggle_max_gap_frames: int = Field(default=0, alias="WIGGLE_MAX_GAP_FRAMES")
+    wiggle_settle_seconds: float = Field(default=0.0, alias="WIGGLE_SETTLE_SECONDS")
+    wiggle_require_burst_metadata: bool = Field(
+        default=False,
+        alias="WIGGLE_REQUIRE_BURST_METADATA",
+    )
+    wiggle_stack_with_sources: bool = Field(
+        default=False,
+        alias="WIGGLE_STACK_WITH_SOURCES",
+    )
+    index_workers: int = Field(default=4, alias="INDEX_WORKERS")
 
     daemon_poll_interval_seconds: int = Field(default=60, alias="DAEMON_POLL_INTERVAL_SECONDS")
 

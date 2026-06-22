@@ -53,3 +53,43 @@ def test_find_wiggle_groups_respects_time_window() -> None:
 
     groups = find_wiggle_groups(assets, threshold=10, time_window_seconds=3.0)
     assert groups == []
+
+
+def test_find_wiggle_groups_links_across_interleaved_unrelated_frame() -> None:
+    seed = "0" * 16
+    assets = [
+        _record("a", "2026-01-01T12:00:00+00:00", seed),
+        _record("x", "2026-01-01T12:00:01+00:00", "f" * 16),
+        _record("b", "2026-01-01T12:00:02+00:00", _similar_phash(seed, flips=3)),
+        _record("c", "2026-01-01T12:00:03+00:00", _similar_phash(seed, flips=6)),
+    ]
+
+    groups = find_wiggle_groups(
+        assets,
+        threshold=10,
+        time_window_seconds=3.0,
+        max_gap_frames=1,
+    )
+    assert len(groups) == 1
+    assert [asset.asset_id for asset in groups[0].assets] == ["a", "b", "c"]
+
+
+def test_find_wiggle_groups_splits_on_mismatched_burst_ids() -> None:
+    seed = "0" * 16
+    assets = [
+        AssetRecord(
+            asset_id="a",
+            local_datetime=datetime.fromisoformat("2026-01-01T12:00:00+00:00"),
+            phash=seed,
+            burst_id="burst-1",
+        ),
+        AssetRecord(
+            asset_id="b",
+            local_datetime=datetime.fromisoformat("2026-01-01T12:00:01+00:00"),
+            phash=_similar_phash(seed, flips=3),
+            burst_id="burst-2",
+        ),
+    ]
+
+    groups = find_wiggle_groups(assets, threshold=10, time_window_seconds=3.0)
+    assert groups == []
