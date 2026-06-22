@@ -4,9 +4,23 @@ import imagehash
 
 from image_helper.models import AssetRecord, WiggleGroup
 
+_phash_cache: dict[str, imagehash.ImageHash] = {}
+
+
+def _cached_phash(phash: str) -> imagehash.ImageHash:
+    cached = _phash_cache.get(phash)
+    if cached is None:
+        cached = imagehash.hex_to_hash(phash)
+        _phash_cache[phash] = cached
+    return cached
+
+
+def clear_phash_cache() -> None:
+    _phash_cache.clear()
+
 
 def phash_distance(left: str, right: str) -> int:
-    return imagehash.hex_to_hash(left) - imagehash.hex_to_hash(right)
+    return _cached_phash(left) - _cached_phash(right)
 
 
 def _time_gap_seconds(left: AssetRecord, right: AssetRecord) -> float:
@@ -103,6 +117,9 @@ def find_wiggle_groups(
 ) -> list[WiggleGroup]:
     if len(assets) < 2:
         return []
+
+    for asset in assets:
+        _cached_phash(asset.phash)
 
     sorted_assets = sorted(assets, key=lambda asset: asset.local_datetime)
     adjacency = _build_adjacency(

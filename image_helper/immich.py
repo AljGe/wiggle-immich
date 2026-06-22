@@ -24,6 +24,7 @@ class ImmichError(Exception):
 class ImmichClient:
     def __init__(self, base_url: str, api_key: str, *, timeout: float = 120.0) -> None:
         self.base_url = base_url.rstrip("/")
+        self._album_cache: dict[str, dict[str, Any]] = {}
         self._client = httpx.Client(
             base_url=self.base_url,
             headers={
@@ -176,16 +177,17 @@ class ImmichClient:
         data = self.download_thumbnail(asset_id)
         return self.compute_phash_from_bytes(data)
 
-    def upload_gif(
+    def upload_asset(
         self,
-        gif_bytes: bytes,
+        asset_bytes: bytes,
         *,
         filename: str,
+        mime_type: str,
         file_created_at: datetime,
         device_asset_id: str,
         device_id: str,
     ) -> dict[str, Any]:
-        files = {"assetData": (filename, gif_bytes, "image/gif")}
+        files = {"assetData": (filename, asset_bytes, mime_type)}
         data = {
             "deviceAssetId": device_asset_id,
             "deviceId": device_id,
@@ -195,6 +197,24 @@ class ImmichClient:
         }
         response = self._request("POST", "/assets", files=files, data=data)
         return response.json()
+
+    def upload_gif(
+        self,
+        gif_bytes: bytes,
+        *,
+        filename: str,
+        file_created_at: datetime,
+        device_asset_id: str,
+        device_id: str,
+    ) -> dict[str, Any]:
+        return self.upload_asset(
+            gif_bytes,
+            filename=filename,
+            mime_type="image/gif",
+            file_created_at=file_created_at,
+            device_asset_id=device_asset_id,
+            device_id=device_id,
+        )
 
     def list_albums(self) -> list[dict[str, Any]]:
         response = self._request("GET", "/albums")
@@ -208,10 +228,18 @@ class ImmichClient:
         self._request("PUT", f"/albums/{album_id}/assets", json={"ids": asset_ids})
 
     def get_or_create_album(self, album_name: str) -> dict[str, Any]:
+        cached = self._album_cache.get(album_name)
+        if cached is not None:
+            return cached
+
         for album in self.list_albums():
             if album.get("albumName") == album_name:
+                self._album_cache[album_name] = album
                 return album
-        return self.create_album(album_name)
+
+        album = self.create_album(album_name)
+        self._album_cache[album_name] = album
+        return album
 
     def create_stack(self, asset_ids: list[str]) -> dict[str, Any]:
         if len(asset_ids) < 2:

@@ -7,6 +7,8 @@ import imagehash
 from PIL import Image, ImageOps
 
 FrameFit = Literal["letterbox", "crop"]
+OutputFormat = Literal["gif", "webp"]
+GifDither = bool
 
 
 def decode_image_rgb(data: bytes) -> Image.Image:
@@ -55,7 +57,7 @@ def center_crop_frame(image: Image.Image, target_size: tuple[int, int]) -> Image
     return image.crop((left, top, right, bottom))
 
 
-def normalize_frames_for_gif(
+def normalize_frames(
     frames: list[Image.Image],
     *,
     max_size: int,
@@ -81,3 +83,123 @@ def normalize_frames_for_gif(
         copy.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         sized.append(copy)
     return sized
+
+
+def normalize_frames_for_gif(
+    frames: list[Image.Image],
+    *,
+    max_size: int,
+    frame_fit: FrameFit = "letterbox",
+) -> list[Image.Image]:
+    return normalize_frames(frames, max_size=max_size, frame_fit=frame_fit)
+
+
+def apply_boomerang(frames: list[Image.Image], *, enabled: bool) -> list[Image.Image]:
+    if not enabled or len(frames) <= 1:
+        return frames
+    return frames + list(reversed(frames))[1:]
+
+
+def _sample_palette_pixels(frames: list[Image.Image], *, max_samples: int = 65536) -> Image.Image:
+    if not frames:
+        raise ValueError("frames must not be empty")
+
+    per_frame = max(1, max_samples // len(frames))
+    strips: list[Image.Image] = []
+    for frame in frames:
+        sample = frame.copy()
+        sample.thumbnail((256, 256), Image.Resampling.LANCZOS)
+        strips.append(sample)
+    width = sum(image.width for image in strips)
+    height = max(image.height for image in strips)
+    canvas = Image.new("RGB", (width, height))
+    offset = 0
+    for image in strips:
+        canvas.paste(image, (offset, 0))
+        offset += image.width
+        image.close()
+    return canvas
+
+
+def quantize_frames_to_palette(
+    frames: list[Image.Image],
+    *,
+    dither: bool = True,
+    colors: int = 256,
+) -> list[Image.Image]:
+    if not frames:
+        return []
+
+    palette_source = _sample_palette_pixels(frames)
+    try:
+        palette_image = palette_source.quantize(
+            colors=colors,
+            method=Image.Quantize.MEDIANCUT,
+        )
+        quantized: list[Image.Image] = []
+        for frame in frames:
+            converted = frame.convert("RGB")
+            quantized.append(
+                converted.quantize(
+                    palette=palette_image,
+                    dither=Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE,
+                )
+            )
+            converted.close()
+        return quantized
+    finally:
+        palette_source.close()
+
+
+def encode_gif(
+    frames: list[Image.Image],
+    *,
+    frame_duration_ms: int,
+    dither: bool = True,
+) -> bytes:
+    if not frames:
+        raise ValueError("frames must not be empty")
+
+    palette_frames = quantize_frames_to_palette(frames, dither=dither)
+    buffer = io.BytesIO()
+    try:
+        palette_frames[0].save(
+            buffer,
+            format="GIF",
+            save_all=True,
+            append_images=palette_frames[1:],
+            duration=frame_duration_ms,
+            loop=0,
+            optimize=True,
+            disposal=2,
+        )
+        return buffer.getvalue()
+    finally:
+        for frame in palette_frames:
+            frame.close()
+
+
+def encode_webp(
+    frames: list[Image.Image],
+    *,
+    frame_duration_ms: int,
+    quality: int = 85,
+    lossless: bool = False,
+    method: int = 4,
+) -> bytes:
+    if not frames:
+        raise ValueError("frames must not be empty")
+
+    buffer = io.BytesIO()
+    frames[0].save(
+        buffer,
+        format="WEBP",
+        save_all=True,
+        append_images=frames[1:],
+        duration=frame_duration_ms,
+        loop=0,
+        quality=quality,
+        lossless=lossless,
+        method=method,
+    )
+    return buffer.getvalue()

@@ -50,6 +50,37 @@ def test_process_webhook_asset_id_hydrates_missing_local_datetime(
     assert result["trigger"] == "AssetCreate"
 
 
+def test_webhook_endpoint_accepts_async_mode(settings: Settings, tmp_path) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from image_helper.webhook import create_app
+
+    settings = Settings(
+        IMMICH_URL="http://immich.test/api",
+        IMMICH_API_KEY="test-key",
+        HASH_DB_PATH=tmp_path / "hashes.sqlite3",
+        WEBHOOK_SECRET="secret",
+        WEBHOOK_ASYNC=True,
+    )
+
+    with patch("image_helper.webhook.WebhookJobQueue") as queue_cls:
+        queue_instance = MagicMock()
+        queue_cls.return_value = queue_instance
+        app = create_app(settings)
+        client = TestClient(app)
+
+        response = client.post(
+            "/webhook/immich",
+            json={"asset": {"id": "asset-1"}},
+            headers={"x-immich-webhook-secret": "secret"},
+        )
+
+    assert response.status_code == 202
+    queue_instance.submit.assert_called_once()
+    assert response.json()["status"] == "accepted"
+
+
 def test_webhook_endpoint_accepts_id_only_payload(settings: Settings, tmp_path) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
@@ -61,6 +92,41 @@ def test_webhook_endpoint_accepts_id_only_payload(settings: Settings, tmp_path) 
         IMMICH_API_KEY="test-key",
         HASH_DB_PATH=tmp_path / "hashes.sqlite3",
         WEBHOOK_SECRET="secret",
+        WEBHOOK_ASYNC=True,
+    )
+
+    with patch("image_helper.webhook.WebhookJobQueue") as queue_cls:
+        queue_instance = MagicMock()
+        queue_cls.return_value = queue_instance
+        app = create_app(settings)
+        client = TestClient(app)
+
+        with patch("image_helper.webhook.process_webhook_asset_id") as mocked:
+            response = client.post(
+                "/webhook/immich",
+                json={"asset": {"id": "asset-1"}},
+                headers={"x-immich-webhook-secret": "secret"},
+            )
+
+    assert response.status_code == 202
+    queue_instance.submit.assert_called_once()
+    mocked.assert_not_called()
+    assert response.json()["asset_id"] == "asset-1"
+    assert response.json()["status"] == "accepted"
+
+
+def test_webhook_endpoint_sync_mode_processes_inline(settings: Settings, tmp_path) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from image_helper.webhook import create_app
+
+    settings = Settings(
+        IMMICH_URL="http://immich.test/api",
+        IMMICH_API_KEY="test-key",
+        HASH_DB_PATH=tmp_path / "hashes.sqlite3",
+        WEBHOOK_SECRET="secret",
+        WEBHOOK_ASYNC=False,
     )
     app = create_app(settings)
     client = TestClient(app)

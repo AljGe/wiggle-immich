@@ -204,6 +204,35 @@ def test_horizontal_mode_does_not_change_vertical_offset() -> None:
             frame.close()
 
 
+def test_stabilize_corrects_known_translation_at_high_resolution() -> None:
+    """Regression: alignment must work when frames exceed working_max_edge."""
+    size = (2400, 1800)
+    reference = _draw_burst_frame(size=size)
+    shifted = reference.copy()
+    shifted = shifted.transform(
+        shifted.size,
+        Image.Transform.AFFINE,
+        (1, 0, 12, 0, 1, -7),
+        resample=Image.Resampling.BICUBIC,
+    )
+    frames = [reference, shifted]
+
+    stabilized = stabilize_frames(
+        frames,
+        mode="translate",
+        reference="first",
+        crop_to_overlap=False,
+        working_max_edge=1024,
+    )
+    try:
+        assert _translation_error(stabilized, 0) < 1.5
+    finally:
+        for frame in frames:
+            frame.close()
+        for frame in stabilized:
+            frame.close()
+
+
 def test_stabilize_identical_frames_do_not_crash() -> None:
     base = _draw_burst_frame()
     frames = [base.copy(), base.copy(), base.copy()]

@@ -119,8 +119,19 @@ class Settings(BaseSettings):
     wiggle_min_distance: int = Field(default=2, alias="WIGGLE_MIN_DISTANCE")
     wiggle_time_window_seconds: float = Field(default=3.0, alias="WIGGLE_TIME_WINDOW_SECONDS")
     wiggle_frame_duration_ms: int = Field(default=100, alias="WIGGLE_FRAME_DURATION_MS")
-    wiggle_max_size: int = Field(default=600, alias="WIGGLE_MAX_SIZE")
+    wiggle_max_size: int = Field(default=900, alias="WIGGLE_MAX_SIZE")
     wiggle_boomerang: bool = Field(default=True, alias="WIGGLE_BOOMERANG")
+    wiggle_output_format: Literal["gif", "webp", "both"] = Field(
+        default="webp",
+        alias="WIGGLE_OUTPUT_FORMAT",
+    )
+    wiggle_webp_quality: int = Field(default=85, alias="WIGGLE_WEBP_QUALITY")
+    wiggle_webp_lossless: bool = Field(default=False, alias="WIGGLE_WEBP_LOSSLESS")
+    wiggle_gif_dither: bool = Field(default=True, alias="WIGGLE_GIF_DITHER")
+    wiggle_gif_fallback: bool = Field(default=False, alias="WIGGLE_GIF_FALLBACK")
+    wiggle_download_workers: int = Field(default=4, alias="WIGGLE_DOWNLOAD_WORKERS")
+    wiggle_cache_dir: Path | None = Field(default=None, alias="WIGGLE_CACHE_DIR")
+    wiggle_cache_memory_entries: int = Field(default=64, alias="WIGGLE_CACHE_MEMORY_ENTRIES")
     wiggle_album_name: str = Field(default="Wigglegrams", alias="WIGGLE_ALBUM_NAME")
     wiggle_hash_source: Literal["original", "thumbnail"] = Field(
         default="original",
@@ -169,6 +180,9 @@ class Settings(BaseSettings):
         alias="WIGGLE_STABILIZE_WORKING_MAX_EDGE",
     )
     index_workers: int = Field(default=4, alias="INDEX_WORKERS")
+    export_workers: int = Field(default=1, alias="EXPORT_WORKERS")
+    webhook_async: bool = Field(default=True, alias="WEBHOOK_ASYNC")
+    webhook_queue_size: int = Field(default=128, alias="WEBHOOK_QUEUE_SIZE")
 
     daemon_poll_interval_seconds: int = Field(default=60, alias="DAEMON_POLL_INTERVAL_SECONDS")
 

@@ -74,6 +74,9 @@ class HashStore:
                 CREATE INDEX IF NOT EXISTS idx_asset_hashes_local_datetime
                   ON asset_hashes(local_datetime);
 
+                CREATE INDEX IF NOT EXISTS idx_asset_hashes_checksum
+                  ON asset_hashes(checksum);
+
                 CREATE TABLE IF NOT EXISTS wiggle_exports (
                   group_key TEXT PRIMARY KEY,
                   gif_asset_id TEXT NOT NULL,
@@ -148,14 +151,25 @@ class HashStore:
             )
 
     def get(self, asset_id: str) -> AssetRecord | None:
+        records = self.get_many([asset_id])
+        return records.get(asset_id)
+
+    def get_many(self, asset_ids: list[str]) -> dict[str, AssetRecord]:
+        if not asset_ids:
+            return {}
+
+        unique_ids = list(dict.fromkeys(asset_ids))
+        placeholders = ", ".join("?" for _ in unique_ids)
         with self._connect() as conn:
-            row = conn.execute(
-                f"SELECT {', '.join(_ASSET_COLUMNS)} FROM asset_hashes WHERE asset_id = ?",
-                (asset_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return _row_to_record(row)
+            rows = conn.execute(
+                f"""
+                SELECT {', '.join(_ASSET_COLUMNS)}
+                FROM asset_hashes
+                WHERE asset_id IN ({placeholders})
+                """,
+                tuple(unique_ids),
+            ).fetchall()
+        return {row["asset_id"]: _row_to_record(row) for row in rows}
 
     def has_checksum(self, checksum: str | None) -> bool:
         if not checksum:
@@ -214,12 +228,24 @@ class HashStore:
             )
 
     def is_exported(self, group_key: str) -> bool:
+        return group_key in self.exported_group_keys([group_key])
+
+    def exported_group_keys(self, group_keys: list[str]) -> set[str]:
+        if not group_keys:
+            return set()
+
+        unique_keys = list(dict.fromkeys(group_keys))
+        placeholders = ", ".join("?" for _ in unique_keys)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM wiggle_exports WHERE group_key = ? LIMIT 1",
-                (group_key,),
-            ).fetchone()
-        return row is not None
+            rows = conn.execute(
+                f"""
+                SELECT group_key
+                FROM wiggle_exports
+                WHERE group_key IN ({placeholders})
+                """,
+                tuple(unique_keys),
+            ).fetchall()
+        return {row["group_key"] for row in rows}
 
     def get_exported_asset_id(self, group_key: str) -> str | None:
         with self._connect() as conn:
@@ -232,16 +258,28 @@ class HashStore:
         return row["gif_asset_id"]
 
     def touch_pending_group(self, group_key: str, *, seen_at: datetime | None = None) -> None:
+        self.touch_pending_groups([group_key], seen_at=seen_at)
+
+    def touch_pending_groups(
+        self,
+        group_keys: list[str],
+        *,
+        seen_at: datetime | None = None,
+    ) -> None:
+        if not group_keys:
+            return
+
         seen = (seen_at or datetime.now(timezone.utc)).isoformat()
+        rows = [(group_key, seen, seen) for group_key in dict.fromkeys(group_keys)]
         with self._transaction() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO pending_wiggle_groups (group_key, first_seen_at, last_seen_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(group_key) DO UPDATE SET
                   last_seen_at = excluded.last_seen_at
                 """,
-                (group_key, seen, seen),
+                rows,
             )
 
     def list_ready_pending_group_keys(

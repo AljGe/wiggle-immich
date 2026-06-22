@@ -93,8 +93,9 @@ def _match_keypoints(
     frame_gray: np.ndarray,
     *,
     center_roi: bool,
+    detector: cv2.ORB,
+    matcher: cv2.BFMatcher,
 ) -> tuple[np.ndarray, np.ndarray]:
-    detector = _create_orb_detector()
     ref_keypoints, ref_descriptors = detector.detectAndCompute(reference_gray, None)
     frame_keypoints, frame_descriptors = detector.detectAndCompute(frame_gray, None)
     if (
@@ -105,7 +106,6 @@ def _match_keypoints(
     ):
         return np.empty((0, 2), dtype=np.float32), np.empty((0, 2), dtype=np.float32)
 
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = matcher.match(ref_descriptors, frame_descriptors)
     if len(matches) < _MIN_ORB_MATCHES:
         return np.empty((0, 2), dtype=np.float32), np.empty((0, 2), dtype=np.float32)
@@ -145,11 +145,15 @@ def _estimate_affine(
     *,
     mode: StabilizeMode,
     max_rotation_deg: float,
+    detector: cv2.ORB,
+    matcher: cv2.BFMatcher,
 ) -> np.ndarray | None:
     ref_points, frame_points = _match_keypoints(
         reference_gray,
         frame_gray,
         center_roi=False,
+        detector=detector,
+        matcher=matcher,
     )
     if len(ref_points) >= _MIN_ORB_MATCHES:
         matrix, _inliers = cv2.estimateAffinePartial2D(
@@ -230,6 +234,8 @@ def _apply_stereo_anchor(
     frames: list[Image.Image],
     *,
     reference_index: int,
+    detector: cv2.ORB,
+    matcher: cv2.BFMatcher,
 ) -> list[Image.Image]:
     reference_gray = _to_gray_array(frames[reference_index])
     disparities_by_index: dict[int, float] = {}
@@ -241,6 +247,8 @@ def _apply_stereo_anchor(
             reference_gray,
             _to_gray_array(frame),
             center_roi=True,
+            detector=detector,
+            matcher=matcher,
         )
         if len(ref_points) == 0:
             continue
@@ -278,53 +286,67 @@ def stabilize_frames(
 
     align_mode: StabilizeMode = "rigid" if mode == "auto" else mode
     reference_index = _reference_index(len(frames), reference)
-    reference_frame = frames[reference_index]
-    output_size = reference_frame.size
 
-    reference_working, _ = _resize_for_working(reference_frame, working_max_edge)
-    reference_gray = _to_gray_array(reference_working)
-    reference_working.close()
+    working_frames: list[Image.Image] = []
+    try:
+        for frame in frames:
+            working, _ = _resize_for_working(frame, working_max_edge)
+            working_frames.append(working)
 
-    aligned: list[Image.Image | None] = [None] * len(frames)
-    aligned[reference_index] = reference_frame.copy()
+        output_size = working_frames[reference_index].size
+        reference_gray = _to_gray_array(working_frames[reference_index])
 
-    for index, frame in enumerate(frames):
-        if index == reference_index:
-            continue
+        detector = _create_orb_detector()
+        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-        frame_working, _ = _resize_for_working(frame, working_max_edge)
-        frame_gray = _to_gray_array(frame_working)
-        matrix = _estimate_affine(
-            reference_gray,
-            frame_gray,
-            mode=align_mode,
-            max_rotation_deg=max_rotation_deg,
-        )
-        frame_working.close()
+        aligned: list[Image.Image | None] = [None] * len(working_frames)
+        aligned[reference_index] = working_frames[reference_index].copy()
 
-        if matrix is None:
-            logger.warning("Stabilization skipped for frame %s: alignment failed", index)
-            aligned[index] = frame.copy()
-            continue
+        for index, frame in enumerate(working_frames):
+            if index == reference_index:
+                continue
+
+            frame_gray = _to_gray_array(frame)
+            matrix = _estimate_affine(
+                reference_gray,
+                frame_gray,
+                mode=align_mode,
+                max_rotation_deg=max_rotation_deg,
+                detector=detector,
+                matcher=matcher,
+            )
+
+            if matrix is None:
+                logger.warning("Stabilization skipped for frame %s: alignment failed", index)
+                aligned[index] = frame.copy()
+                continue
+
+            if mode == "auto":
+                matrix = _shake_only_matrix(matrix)
+
+            aligned[index] = _warp_image(frame, matrix, output_size)
+
+        result = [frame for frame in aligned if frame is not None]
 
         if mode == "auto":
-            matrix = _shake_only_matrix(matrix)
+            anchored = _apply_stereo_anchor(
+                result,
+                reference_index=reference_index,
+                detector=detector,
+                matcher=matcher,
+            )
+            for index, frame in enumerate(result):
+                if anchored[index] is not frame:
+                    frame.close()
+            result = anchored
 
-        aligned[index] = _warp_image(frame, matrix, output_size)
-
-    result = [frame for frame in aligned if frame is not None]
-
-    if mode == "auto":
-        anchored = _apply_stereo_anchor(result, reference_index=reference_index)
-        for index, frame in enumerate(result):
-            if anchored[index] is not frame:
+        if crop_to_overlap:
+            cropped = _crop_to_overlap(result)
+            for frame in result:
                 frame.close()
-        result = anchored
+            result = cropped
 
-    if crop_to_overlap:
-        cropped = _crop_to_overlap(result)
-        for frame in result:
+        return result
+    finally:
+        for frame in working_frames:
             frame.close()
-        result = cropped
-
-    return result

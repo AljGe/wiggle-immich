@@ -29,7 +29,7 @@ from image_helper.immich_workflows import (
     probe_workflows,
 )
 from image_helper.hashstore import HashStore
-from image_helper.immich import ImmichClient, ImmichError
+from image_helper.immich import ImmichClient, ImmichError, parse_local_datetime
 from image_helper.group_validation import RejectedWiggleGroup
 from image_helper.models import AssetRecord, WiggleGroup
 from image_helper.service import (
@@ -155,6 +155,18 @@ def _print_rejected_groups(rejected: list[RejectedWiggleGroup]) -> None:
         )
 
     console.print(table)
+
+
+def _max_asset_updated_at(assets: list[dict]) -> datetime | None:
+    latest: datetime | None = None
+    for asset in assets:
+        value = asset.get("updatedAt")
+        if not value:
+            continue
+        parsed = parse_local_datetime(str(value))
+        if latest is None or parsed > latest:
+            latest = parsed
+    return latest
 
 
 def _index_assets(
@@ -521,14 +533,15 @@ def daemon(
         console.print(f"Polling assets updated after {cursor.isoformat()}")
 
         with ImmichClient(settings.immich_base_url, settings.immich_api_key) as client:
+            asset_list = list(client.search_images(updated_after=cursor, order="asc"))
             indexed, _, _, indexed_records = _index_assets(
                 client,
                 store,
-                client.search_images(updated_after=cursor, order="asc"),
+                asset_list,
                 settings,
             )
 
-        detection = run_daemon_detection(settings, store, indexed_records)
+        detection = run_daemon_detection(settings, store, indexed_records or [])
         pending = collect_export_candidates(settings, store, detection.accepted)
         console.print(
             f"Indexed {indexed} assets; {len(pending)} export candidate(s) ready."
@@ -540,7 +553,8 @@ def daemon(
                 f"Export complete. exported={summary.exported} skipped={summary.skipped} errors={summary.errors}"
             )
 
-        store.set_daemon_cursor(now)
+        next_cursor = _max_asset_updated_at(asset_list) if asset_list else None
+        store.set_daemon_cursor(next_cursor or now)
 
     if once:
         run_cycle()
