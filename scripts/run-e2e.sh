@@ -20,7 +20,52 @@ if [[ -z "$PYTHON" ]]; then
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker not found. Enable Docker Desktop WSL integration, then retry." >&2
+  echo "Docker CLI not found. Install Docker or enable Docker Desktop WSL integration." >&2
+  exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  wsl_distro="${WSL_DISTRO_NAME:-archlinux}"
+
+  if [[ -d /mnt/wsl/docker-desktop ]]; then
+    cat >&2 <<EOF
+Docker Desktop is running, but WSL integration is not active in this distro.
+
+Your WSL distro appears to be: ${wsl_distro:-archlinux}
+
+Fix:
+  1. Open Docker Desktop on Windows
+  2. Settings -> Resources -> WSL integration
+  3. Enable integration for "${wsl_distro:-archlinux}"
+  4. Click "Apply & restart"
+  5. Close this terminal and open a new one
+  6. Verify: ls -la /var/run/docker.sock && docker info
+
+If the distro is missing from the list, run "wsl -l -v" in PowerShell
+to confirm the exact name Docker Desktop should show.
+
+EOF
+  else
+    cat >&2 <<'EOF'
+Docker daemon is not reachable from this WSL distro.
+
+The CLI is installed, but /var/run/docker.sock is missing. Pick one fix:
+
+A) Docker Desktop (common on WSL2)
+   1. Start Docker Desktop on Windows
+   2. Settings -> Resources -> WSL integration
+   3. Enable integration for this distro
+   4. Restart this WSL terminal and run: docker info
+
+B) Native Docker inside WSL (Arch)
+   sudo pacman -S docker docker-compose
+   sudo systemctl enable --now docker
+   sudo usermod -aG docker "$USER"   # then log out/in
+   docker info
+
+EOF
+  fi
+  echo "After docker info works, re-run: ./scripts/run-e2e.sh" >&2
   exit 1
 fi
 
