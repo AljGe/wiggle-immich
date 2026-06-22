@@ -1,0 +1,89 @@
+# Isolated Immich stack for image-helper E2E tests.
+# Data lives under docker/test-data/ (gitignored).
+
+name: image-helper-test
+
+services:
+  immich-server:
+    container_name: image_helper_immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    env_file:
+      - immich.env
+    volumes:
+      - ${UPLOAD_LOCATION:-./test-data/library}:/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "${IMMICH_PORT:-2283}:2283"
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2283/api/server/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  immich-machine-learning:
+    container_name: image_helper_immich_ml
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    env_file:
+      - immich.env
+    volumes:
+      - model-cache:/cache
+    restart: unless-stopped
+
+  redis:
+    container_name: image_helper_immich_redis
+    image: docker.io/valkey/valkey:8
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  database:
+    container_name: image_helper_immich_postgres
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
+    env_file:
+      - immich.env
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_DB: ${DB_DATABASE_NAME:-immich}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - ${DB_DATA_LOCATION:-./test-data/postgres}:/var/lib/postgresql/data
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d ${DB_DATABASE_NAME:-immich}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  image-helper:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: image_helper_runner
+    env_file:
+      - test.runtime.env
+    environment:
+      IMMICH_URL: http://immich-server:2283/api
+      HASH_DB_PATH: /data/hashes.sqlite3
+    volumes:
+      - helper-data:/data
+    depends_on:
+      immich-server:
+        condition: service_healthy
+    profiles:
+      - helper
+
+volumes:
+  model-cache:
+  helper-data:

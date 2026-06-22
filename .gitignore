@@ -1,4 +1,7 @@
-__pycache__/
+testdata/fixtures/*.png
+docker/test-data/
+docker/test.runtime.env
+
 *.py[cod]
 *$py.class
 *.egg-info/

@@ -67,6 +67,62 @@ image-helper daemon
 3. Lower `WIGGLE_THRESHOLD` for stricter matching; raise it if bursts are missed.
 4. Adjust `WIGGLE_TIME_WINDOW_SECONDS` if unrelated photos get grouped.
 
+## Testing
+
+### Fast unit tests (no Docker)
+
+```bash
+uv venv .venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+pytest
+```
+
+These cover detector logic (phash grouping, time-window guard) without Immich.
+
+### Full contained E2E (Docker + Immich)
+
+This spins up an isolated Immich stack, uploads synthetic wiggle burst frames, runs the full `index → detect → export` pipeline, and verifies the GIF lands in the `Wigglegrams` album.
+
+**Requirements:** Docker with WSL2 integration enabled (Docker Desktop → Settings → Resources → WSL integration).
+
+```bash
+# One command — brings stack up, runs pipeline, tears down
+./scripts/run-e2e.sh
+
+# Keep Immich running after success for manual inspection
+KEEP_STACK=1 ./scripts/run-e2e.sh
+```
+
+**What it does:**
+
+1. `scripts/generate_fixtures.py` — creates 3 slightly-shifted PNG burst frames + 1 control image
+2. `docker/compose.test.yml` — Immich (server, postgres, redis, ML) on port `2283`
+3. `scripts/e2e_bootstrap.py` — creates admin, API key, uploads fixtures, waits for thumbnails
+4. `image-helper` container — runs index/detect/export against `http://immich-server:2283/api`
+5. `scripts/e2e_verify.py` — asserts GIF exists in the `Wigglegrams` album
+
+**Manual steps** (if you prefer step-by-step):
+
+```bash
+python scripts/generate_fixtures.py testdata/fixtures
+
+docker compose --env-file docker/immich.env \
+  -f docker/compose.test.yml --project-directory docker up -d --wait
+
+python scripts/e2e_bootstrap.py --fixtures-dir testdata/fixtures
+
+docker compose --env-file docker/immich.env \
+  -f docker/compose.test.yml --project-directory docker \
+  --profile helper run --rm image-helper index
+docker compose --env-file docker/immich.env \
+  -f docker/compose.test.yml --project-directory docker \
+  --profile helper run --rm image-helper export
+
+# Immich UI: http://localhost:2283  (admin@image-helper.test / image-helper-test)
+```
+
+Test data is stored under `docker/test-data/` and removed on teardown (`docker compose down -v`).
+
 ## Phase 2: native Immich workflow webhook
 
 When Immich merges the webhook workflow step, enable the receiver:
