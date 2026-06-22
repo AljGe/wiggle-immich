@@ -30,10 +30,12 @@ from image_helper.immich_workflows import (
 )
 from image_helper.hashstore import HashStore
 from image_helper.immich import ImmichClient, ImmichError
+from image_helper.group_validation import RejectedWiggleGroup
 from image_helper.models import AssetRecord, WiggleGroup
 from image_helper.service import (
     INDEX_BATCH_SIZE,
     detect_groups,
+    detect_groups_detailed,
     export_groups,
     flush_index_batch,
     prepare_index_record,
@@ -98,17 +100,54 @@ def _print_groups(groups: list[WiggleGroup], *, store: HashStore) -> None:
     table.add_column("Start time")
     table.add_column("Frames", justify="right")
     table.add_column("Avg dist", justify="right")
+    table.add_column("Dist range", justify="right")
+    table.add_column("Dimensions")
+    table.add_column("Stack")
     table.add_column("Asset IDs")
     table.add_column("Exported")
 
     for group in groups:
         asset_ids = ", ".join(asset.asset_id for asset in group.assets)
+        dist_range = "n/a"
+        if group.min_distance is not None and group.max_distance is not None:
+            dist_range = f"{group.min_distance}-{group.max_distance}"
         table.add_row(
             group.assets[0].local_datetime.isoformat(),
             str(len(group.assets)),
             f"{group.average_distance:.1f}",
+            dist_range,
+            group.dimensions_summary,
+            group.stack_summary,
             asset_ids,
             "yes" if store.is_exported(group.group_key) else "no",
+        )
+
+    console.print(table)
+
+
+def _print_rejected_groups(rejected: list[RejectedWiggleGroup]) -> None:
+    if not rejected:
+        console.print("No rejected wiggle candidates.")
+        return
+
+    table = Table(title="Rejected wiggle candidates")
+    table.add_column("Start time")
+    table.add_column("Frames", justify="right")
+    table.add_column("Avg dist", justify="right")
+    table.add_column("Dimensions")
+    table.add_column("Reason")
+    table.add_column("Asset IDs")
+
+    for entry in rejected:
+        group = entry.group
+        asset_ids = ", ".join(asset.asset_id for asset in group.assets)
+        table.add_row(
+            group.assets[0].local_datetime.isoformat(),
+            str(len(group.assets)),
+            f"{group.average_distance:.1f}",
+            group.dimensions_summary,
+            entry.reason,
+            asset_ids,
         )
 
     console.print(table)
@@ -121,6 +160,7 @@ def _index_assets(
     *,
     force: bool = False,
     verbose: bool = False,
+    hash_source: str = "original",
 ) -> tuple[int, int, int]:
     added = 0
     skipped = 0
@@ -129,7 +169,13 @@ def _index_assets(
 
     for asset in assets:
         try:
-            record = prepare_index_record(client, store, asset, force=force)
+            record = prepare_index_record(
+                client,
+                store,
+                asset,
+                force=force,
+                hash_source=hash_source,
+            )
             if record is None:
                 skipped += 1
                 continue
@@ -365,6 +411,7 @@ def index(
             client.iter_all_images(),
             force=force,
             verbose=verbose,
+            hash_source=settings.wiggle_hash_source,
         )
 
     console.print(
@@ -376,21 +423,28 @@ def index(
 def detect(
     ctx: typer.Context,
     dry_run: bool = typer.Option(True, "--dry-run/--upload", help="Report only; use --upload to export."),
+    show_rejected: bool = typer.Option(
+        False,
+        "--show-rejected",
+        help="Also list candidate groups rejected by validation rules.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Detect wiggle groups from the hash store."""
     _setup_logging(verbose)
     settings = _require_settings(ctx)
     store = HashStore(settings.hash_db_path)
-    groups = detect_groups(settings, store)
+    detection = detect_groups_detailed(settings, store)
 
-    _print_groups(groups, store=store)
+    _print_groups(detection.accepted, store=store)
+    if show_rejected:
+        _print_rejected_groups(detection.rejected)
 
     if dry_run:
         console.print("[yellow]Dry run only. Re-run with --upload to export GIFs.[/yellow]")
         return
 
-    summary = export_groups(settings, store, groups)
+    summary = export_groups(settings, store, detection.accepted)
     console.print(
         f"Export complete. exported={summary.exported} skipped={summary.skipped} errors={summary.errors}"
     )
@@ -399,15 +453,22 @@ def detect(
 @app.command(name="export")
 def export_cmd(
     ctx: typer.Context,
+    show_rejected: bool = typer.Option(
+        False,
+        "--show-rejected",
+        help="Also list candidate groups rejected by validation rules.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Detect and export wiggle GIFs (uploads to Immich)."""
     _setup_logging(verbose)
     settings = _require_settings(ctx)
     store = HashStore(settings.hash_db_path)
-    groups = detect_groups(settings, store)
-    _print_groups(groups, store=store)
-    summary = export_groups(settings, store, groups)
+    detection = detect_groups_detailed(settings, store)
+    _print_groups(detection.accepted, store=store)
+    if show_rejected:
+        _print_rejected_groups(detection.rejected)
+    summary = export_groups(settings, store, detection.accepted)
     console.print(
         f"Export complete. exported={summary.exported} skipped={summary.skipped} errors={summary.errors}"
     )
@@ -437,6 +498,7 @@ def daemon(
                 client,
                 store,
                 client.search_images(updated_after=cursor, order="asc"),
+                hash_source=settings.wiggle_hash_source,
             )
 
         groups = detect_groups(settings, store)

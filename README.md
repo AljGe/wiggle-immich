@@ -94,10 +94,17 @@ image-helper config init --output ~/.config/image-helper/env
 | `IMMICH_API_KEY` | — | API key (required) |
 | `HASH_DB_PATH` | `./data/hashes.sqlite3` | SQLite hash cache |
 | `WIGGLE_THRESHOLD` | `10` | Max phash distance for grouping |
+| `WIGGLE_MIN_DISTANCE` | `2` | Reject edit-like groups below this average adjacent distance |
 | `WIGGLE_TIME_WINDOW_SECONDS` | `3.0` | Max seconds between adjacent frames |
 | `WIGGLE_FRAME_DURATION_MS` | `100` | GIF frame duration |
 | `WIGGLE_MAX_SIZE` | `600` | Max GIF frame dimension |
 | `WIGGLE_BOOMERANG` | `true` | Reverse playback in GIF |
+| `WIGGLE_FRAME_FIT` | `letterbox` | Frame alignment mode (`letterbox` or `crop`) |
+| `WIGGLE_HASH_SOURCE` | `original` | Hash originals (`original`) or thumbnails (`thumbnail`) |
+| `WIGGLE_MAX_DIMENSION_DRIFT` | `0.02` | Reject groups when width/height drift exceeds this ratio |
+| `WIGGLE_EXCLUDE_STACKED` | `true` | Reject groups whose members share an Immich stack |
+| `WIGGLE_MIN_FRAMES` | `2` | Minimum frames required in a group |
+| `WIGGLE_NEIGHBOR_SEARCH_PRIMARY_ONLY` | `false` | Webhook neighbor search: exclude non-primary stacked assets |
 | `WIGGLE_ALBUM_NAME` | `Wigglegrams` | Target album for exports |
 | `DAEMON_POLL_INTERVAL_SECONDS` | `60` | Daemon poll interval |
 | `WEBHOOK_HOST` | `0.0.0.0` | Webhook bind address |
@@ -148,9 +155,24 @@ Hash data persists in the `helper-data` volume.
 ## Threshold tuning
 
 1. Run `image-helper index` on your library.
-2. Run `image-helper detect` and inspect the **Avg dist** column.
+2. Run `image-helper detect --show-rejected` and inspect accepted groups plus rejection reasons.
 3. Lower `WIGGLE_THRESHOLD` for stricter matching; raise it if bursts are missed.
-4. Adjust `WIGGLE_TIME_WINDOW_SECONDS` if unrelated photos get grouped.
+4. Raise `WIGGLE_MIN_DISTANCE` if Immich edits of a single photo still group together.
+5. Lower `WIGGLE_MAX_DIMENSION_DRIFT` if unstacked crop edits slip through.
+6. Adjust `WIGGLE_TIME_WINDOW_SECONDS` if unrelated photos get grouped.
+
+After upgrading image-helper with new metadata fields, re-index once:
+
+```bash
+image-helper index --force
+```
+
+Rejected candidates are filtered for:
+
+- shared Immich stacks (edited variants stacked with the original)
+- mismatched dimensions (typical of crop edits)
+- edit-like near-duplicates with identical/non-progressive timestamps
+- previously exported `wiggle_*.gif` assets
 
 ## Testing
 

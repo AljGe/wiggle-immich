@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import io
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 import httpx
-import imagehash
 import pillow_heif
-from PIL import Image
+
+from image_helper.frames import compute_phash_from_bytes as frames_compute_phash
 
 pillow_heif.register_heif_opener()
 
@@ -59,13 +58,17 @@ class ImmichClient:
         updated_before: datetime | None = None,
         size: int = 250,
         order: str = "asc",
+        with_exif: bool = True,
+        with_stacked: bool | None = None,
     ) -> Iterator[dict[str, Any]]:
         payload: dict[str, Any] = {
             "type": "IMAGE",
             "size": size,
             "order": order,
-            "withExif": False,
+            "withExif": with_exif,
         }
+        if with_stacked is not None:
+            payload["withStacked"] = with_stacked
         if taken_after is not None:
             payload["takenAfter"] = _to_iso(taken_after)
         if taken_before is not None:
@@ -102,6 +105,7 @@ class ImmichClient:
         *,
         window_seconds: float,
         batch_size: int = 100,
+        with_stacked: bool | None = None,
     ) -> list[dict[str, Any]]:
         half = timedelta(seconds=window_seconds / 2)
         taken_after = center - half
@@ -112,6 +116,7 @@ class ImmichClient:
                 taken_before=taken_before,
                 size=batch_size,
                 order="asc",
+                with_stacked=with_stacked,
             )
         )
         assets.sort(key=lambda asset: asset["localDateTime"])
@@ -152,10 +157,20 @@ class ImmichClient:
         return response.content
 
     def compute_phash_from_bytes(self, data: bytes) -> str:
-        with Image.open(io.BytesIO(data)) as image:
-            image.load()
-            rgb = image.convert("RGB")
-            return str(imagehash.phash(rgb))
+        return frames_compute_phash(data)
+
+    def hash_asset(self, asset_id: str, *, source: str = "original") -> str:
+        if source == "thumbnail":
+            return self.hash_asset_thumbnail(asset_id)
+        try:
+            data = self.download_original(asset_id)
+            return self.compute_phash_from_bytes(data)
+        except ImmichError:
+            logger.warning(
+                "Falling back to thumbnail hash for %s after original download failed",
+                asset_id,
+            )
+            return self.hash_asset_thumbnail(asset_id)
 
     def hash_asset_thumbnail(self, asset_id: str) -> str:
         data = self.download_thumbnail(asset_id)

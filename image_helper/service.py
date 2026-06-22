@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
+from image_helper.asset_metadata import extract_asset_metadata
 from image_helper.config import Settings
 from image_helper.detector import find_wiggle_groups
 from image_helper.exporter import export_wiggle_group
-from image_helper.hashstore import HashStore
+from image_helper.group_validation import RejectedWiggleGroup, partition_wiggle_groups
+from image_helper.hashstore import HashStore, dimensions_from_image_bytes
 from image_helper.immich import ImmichClient, ImmichError, parse_local_datetime
 from image_helper.models import AssetRecord, WiggleGroup
 
@@ -17,7 +20,24 @@ class ExportSummary:
     errors: int = 0
 
 
+@dataclass
+class DetectResult:
+    accepted: list[WiggleGroup]
+    rejected: list[RejectedWiggleGroup]
+
+
 INDEX_BATCH_SIZE = 50
+
+
+def _image_bytes_for_index(
+    client: ImmichClient,
+    asset_id: str,
+    *,
+    hash_source: str,
+) -> bytes:
+    if hash_source == "thumbnail":
+        return client.download_thumbnail(asset_id)
+    return client.download_original(asset_id)
 
 
 def prepare_index_record(
@@ -26,6 +46,7 @@ def prepare_index_record(
     asset: dict,
     *,
     force: bool = False,
+    hash_source: str = "original",
 ) -> AssetRecord | None:
     asset_id = asset["id"]
     checksum = asset.get("checksum")
@@ -35,12 +56,36 @@ def prepare_index_record(
         if checksum and existing.checksum == checksum:
             return None
 
-    phash = client.hash_asset_thumbnail(asset_id)
+    metadata = extract_asset_metadata(asset)
+    width = metadata["width"]
+    height = metadata["height"]
+
+    try:
+        image_bytes = _image_bytes_for_index(client, asset_id, hash_source=hash_source)
+    except ImmichError:
+        if hash_source == "original":
+            image_bytes = client.download_thumbnail(asset_id)
+        else:
+            raise
+
+    phash = client.compute_phash_from_bytes(image_bytes)
+    if width is None or height is None:
+        try:
+            width, height = dimensions_from_image_bytes(image_bytes)
+        except Exception:
+            width = width
+            height = height
+
     return AssetRecord(
         asset_id=asset_id,
         phash=phash,
         local_datetime=parse_local_datetime(asset["localDateTime"]),
         checksum=checksum,
+        width=width,
+        height=height,
+        original_file_name=metadata["original_file_name"],
+        stack_id=metadata["stack_id"],
+        is_primary_in_stack=metadata["is_primary_in_stack"],
     )
 
 
@@ -50,8 +95,15 @@ def index_asset(
     asset: dict,
     *,
     force: bool = False,
+    hash_source: str = "original",
 ) -> bool:
-    record = prepare_index_record(client, store, asset, force=force)
+    record = prepare_index_record(
+        client,
+        store,
+        asset,
+        force=force,
+        hash_source=hash_source,
+    )
     if record is None:
         return False
     store.upsert(record)
@@ -67,13 +119,46 @@ def flush_index_batch(store: HashStore, batch: list[AssetRecord]) -> int:
     return count
 
 
-def detect_groups(settings: Settings, store: HashStore) -> list[WiggleGroup]:
-    records = store.list_all()
+def _find_raw_groups(
+    records: list[AssetRecord],
+    settings: Settings,
+) -> list[WiggleGroup]:
     return find_wiggle_groups(
         records,
         threshold=settings.wiggle_threshold,
         time_window_seconds=settings.wiggle_time_window_seconds,
     )
+
+
+def detect_groups_with_validation(
+    settings: Settings,
+    records: list[AssetRecord],
+) -> DetectResult:
+    raw_groups = _find_raw_groups(records, settings)
+    accepted, rejected = partition_wiggle_groups(raw_groups, settings)
+    return DetectResult(accepted=accepted, rejected=rejected)
+
+
+def detect_groups(settings: Settings, store: HashStore) -> list[WiggleGroup]:
+    return detect_groups_with_validation(settings, store.list_all()).accepted
+
+
+def detect_groups_detailed(settings: Settings, store: HashStore) -> DetectResult:
+    return detect_groups_with_validation(settings, store.list_all())
+
+
+def detect_groups_in_range(
+    settings: Settings,
+    store: HashStore,
+    *,
+    center: datetime,
+    window_seconds: float,
+) -> DetectResult:
+    margin = max(window_seconds, settings.wiggle_time_window_seconds * 4)
+    start = center - timedelta(seconds=margin)
+    end = center + timedelta(seconds=margin)
+    records = store.list_in_range(start, end)
+    return detect_groups_with_validation(settings, records)
 
 
 def export_groups(
@@ -102,6 +187,7 @@ def export_groups(
                     max_size=settings.wiggle_max_size,
                     boomerang=settings.wiggle_boomerang,
                     device_id=settings.device_id,
+                    frame_fit=settings.wiggle_frame_fit,
                 )
                 gif_asset_id = uploaded.get("id")
                 if not gif_asset_id:
@@ -138,15 +224,25 @@ def process_webhook_asset_id(
         asset, resolved = resolve_webhook_asset(client, asset)
         client.wait_for_thumbnail(asset_id)
 
+        neighbor_window = max(settings.wiggle_time_window_seconds * 4, 30)
+        with_stacked = (
+            False if settings.wiggle_neighbor_search_primary_only else None
+        )
         neighbors = client.search_neighbors(
             parse_local_datetime(asset["localDateTime"]),
-            window_seconds=max(settings.wiggle_time_window_seconds * 4, 30),
+            window_seconds=neighbor_window,
+            with_stacked=with_stacked,
         )
 
         batch: list[AssetRecord] = []
         indexed_any = False
         for neighbor in neighbors:
-            record = prepare_index_record(client, store, neighbor)
+            record = prepare_index_record(
+                client,
+                store,
+                neighbor,
+                hash_source=settings.wiggle_hash_source,
+            )
             if record is None:
                 continue
             batch.append(record)
@@ -156,10 +252,15 @@ def process_webhook_asset_id(
         if flush_index_batch(store, batch) > 0:
             indexed_any = True
 
-        groups = detect_groups(settings, store)
+        detection = detect_groups_in_range(
+            settings,
+            store,
+            center=parse_local_datetime(asset["localDateTime"]),
+            window_seconds=neighbor_window,
+        )
         relevant = [
             group
-            for group in groups
+            for group in detection.accepted
             if any(member.asset_id == asset_id for member in group.assets)
         ]
         pending = [group for group in relevant if not store.is_exported(group.group_key)]
