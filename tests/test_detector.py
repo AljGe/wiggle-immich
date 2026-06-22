@@ -15,9 +15,12 @@ def _record(asset_id: str, dt: str, phash: str) -> AssetRecord:
     )
 
 
-def _similar_phash(seed: str) -> str:
+def _similar_phash(seed: str, *, flips: int = 2) -> str:
     base = imagehash.hex_to_hash(seed)
-    return str(base + 3)
+    bits = base.hash.copy()
+    for index in range(flips):
+        bits.flat[index] = not bits.flat[index]
+    return str(imagehash.ImageHash(bits))
 
 
 def test_phash_distance_zero_for_identical() -> None:
@@ -27,10 +30,12 @@ def test_phash_distance_zero_for_identical() -> None:
 
 def test_find_wiggle_groups_groups_adjacent_similar_frames() -> None:
     seed = "0" * 16
+    hash_b = _similar_phash(seed, flips=2)
+    hash_c = _similar_phash(hash_b, flips=2)
     assets = [
         _record("a", "2026-01-01T12:00:00+00:00", seed),
-        _record("b", "2026-01-01T12:00:01+00:00", _similar_phash(seed)),
-        _record("c", "2026-01-01T12:00:02+00:00", _similar_phash(seed)),
+        _record("b", "2026-01-01T12:00:01+00:00", hash_b),
+        _record("c", "2026-01-01T12:00:02+00:00", hash_c),
         _record("d", "2026-01-01T12:05:00+00:00", "f" * 16),
     ]
 
