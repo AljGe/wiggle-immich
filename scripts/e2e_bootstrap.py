@@ -13,6 +13,7 @@ import httpx
 
 REQUIRED_PERMISSIONS = [
     "asset.read",
+    "asset.view",
     "asset.download",
     "asset.upload",
     "album.read",
