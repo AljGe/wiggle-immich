@@ -104,6 +104,8 @@ services:
         condition: service_healthy
     profiles:
       - workflow-e2e
+    ports:
+      - "${WEBHOOK_PORT:-8765}:8765"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
       interval: 10s

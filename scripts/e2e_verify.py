@@ -8,6 +8,8 @@ import sys
 
 import httpx
 
+from e2e_album import album_contains_wigglegram
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -28,21 +30,16 @@ def main() -> int:
     album = httpx.get(f"{args.immich_url}/albums/{target['id']}", headers=headers, timeout=30)
     album.raise_for_status()
     album_data = album.json()
-    assets = album_data.get("assets", [])
-    gif_assets = [
-        asset
-        for asset in assets
-        if str(asset.get("originalFileName", "")).startswith("wiggle_")
-        or str(asset.get("originalMimeType", "")).endswith("gif")
-    ]
-    if not gif_assets:
+    if not album_contains_wigglegram(
+        album_data,
+        immich_url=args.immich_url,
+        api_key=args.api_key,
+    ):
         print(f"FAIL: album '{args.album_name}' has no wiggle GIF assets")
         return 1
 
-    print(
-        f"PASS: album '{args.album_name}' contains {len(gif_assets)} wiggle GIF asset(s) "
-        f"(album asset count: {album_data.get('assetCount', len(assets))})"
-    )
+    asset_count = album_data.get("assetCount", len(album_data.get("assets", [])))
+    print(f"PASS: album '{args.album_name}' contains wiggle GIF asset(s) (asset count: {asset_count})")
     return 0
 
 

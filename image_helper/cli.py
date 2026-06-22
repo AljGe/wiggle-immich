@@ -330,7 +330,10 @@ def immich_install_workflow(
         access_token=token,
     )
     if method_info is None:
-        raise typer.Exit("Could not discover workflow webhook method on this Immich build.")
+        raise typer.Exit(
+            "No webhook workflow step on this Immich build. "
+            "Immich v3-rc ships workflows but not an outbound HTTP webhook action yet."
+        )
 
     workflow_id = ensure_wigglegram_workflow(
         settings.immich_base_url,

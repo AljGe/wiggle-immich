@@ -193,7 +193,7 @@ KEEP_STACK=1 ./scripts/run-e2e.sh
 
 ### Workflow preview E2E (Docker + Immich preview + webhook)
 
-Exercises the full `AssetCreate` workflow → webhook → wigglegram path. Uses a preview Immich tag by default.
+Exercises the webhook receiver and wigglegram export path against Immich preview builds. When Immich ships a webhook workflow step, the test installs a real `AssetCreate` workflow; until then it simulates webhook POSTs after upload.
 
 ```bash
 # Preview Immich (default: v3-rc) + image-helper webhook daemon
@@ -209,11 +209,11 @@ WORKFLOW_DEBUG=1 ./scripts/run-e2e-workflow.sh
 **What it does:**
 
 1. Starts Immich with `IMMICH_WORKFLOW_VERSION` (default `v3-rc`)
-2. Starts `image-helper-webhook` (`docker/Dockerfile.webhook`)
-3. `scripts/e2e_workflow_bootstrap.py` — discovers webhook step, installs workflow, uploads fixtures sequentially
+2. Starts `image-helper-webhook` (`docker/Dockerfile.webhook`) on port `8765`
+3. `scripts/e2e_workflow_bootstrap.py` — installs workflow when a webhook step exists, otherwise simulates `AssetCreate` webhooks after upload
 4. Waits for async export and verifies with `scripts/e2e_verify.py`
 
-This test may break when Immich changes workflow plugin schemas. Use `image-helper doctor --workflows` to inspect availability on your instance.
+Immich v3-rc exposes `/workflows` and `/plugins/methods`, but the core plugin does not yet include an outbound HTTP webhook action. `image-helper doctor --workflows` reports whether a webhook step is available on your instance.
 
 **Manual steps** (if you prefer step-by-step):
 

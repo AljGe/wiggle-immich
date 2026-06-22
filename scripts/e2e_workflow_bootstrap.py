@@ -19,6 +19,8 @@ from image_helper.immich_workflows import (
     probe_workflows,
 )
 
+from e2e_album import album_contains_wigglegram
+
 # Reuse Immich bootstrap helpers from REST E2E.
 from e2e_bootstrap import (
     create_api_key,
@@ -30,6 +32,7 @@ from e2e_bootstrap import (
 )
 
 DEFAULT_WEBHOOK_URL = "http://image-helper-webhook:8765/webhook/immich"
+DEFAULT_SIMULATE_WEBHOOK_URL = "http://localhost:8765/webhook/immich"
 DEFAULT_WEBHOOK_SECRET = "image-helper-e2e-secret"
 
 
@@ -55,6 +58,16 @@ def load_api_key_from_env(path: Path) -> str:
         if line.startswith("IMMICH_API_KEY="):
             return line.split("=", 1)[1]
     raise RuntimeError(f"IMMICH_API_KEY not found in {path}")
+
+
+def fire_asset_create_webhook(webhook_url: str, secret: str, asset_id: str) -> None:
+    response = httpx.post(
+        webhook_url,
+        json={"trigger": "AssetCreate", "asset": {"id": asset_id}},
+        headers={"x-immich-webhook-secret": secret},
+        timeout=60,
+    )
+    response.raise_for_status()
 
 
 def upload_burst_fixtures_sequential(
@@ -119,17 +132,13 @@ def wait_for_wigglegram(
             )
             if target is not None:
                 album = httpx.get(f"{base_url}/albums/{target['id']}", headers=headers, timeout=30)
-                if album.is_success:
-                    assets = album.json().get("assets", [])
-                    gif_assets = [
-                        asset
-                        for asset in assets
-                        if str(asset.get("originalFileName", "")).startswith("wiggle_")
-                        or str(asset.get("originalMimeType", "")).endswith("gif")
-                    ]
-                    if gif_assets:
-                        print(f"Wigglegram detected ({len(gif_assets)} GIF asset(s)).")
-                        return True
+                if album.is_success and album_contains_wigglegram(
+                    album.json(),
+                    immich_url=base_url,
+                    api_key=api_key,
+                ):
+                    print("Wigglegram detected in album.")
+                    return True
         time.sleep(3)
 
     return False
@@ -151,6 +160,11 @@ def main() -> int:
     parser.add_argument(
         "--webhook-secret",
         default=os.environ.get("WEBHOOK_SECRET", DEFAULT_WEBHOOK_SECRET),
+    )
+    parser.add_argument(
+        "--simulate-webhook-url",
+        default=os.environ.get("WEBHOOK_SIMULATE_URL", DEFAULT_SIMULATE_WEBHOOK_URL),
+        help="Host-reachable webhook URL when Immich has no webhook workflow step yet.",
     )
     parser.add_argument("--upload-delay", type=float, default=1.0)
     parser.add_argument("--wait-timeout", type=int, default=180)
@@ -184,28 +198,39 @@ def main() -> int:
         return 1
 
     method_info = discover_webhook_method(args.immich_url, access_token=token)
-    if method_info is None:
-        print("FAIL: Could not discover workflow webhook method on this Immich build.", file=sys.stderr)
-        return 1
-
     if os.environ.get("WORKFLOW_DEBUG"):
         print(f"Using webhook method: {method_info}")
 
-    workflow_id = ensure_wigglegram_workflow(
-        args.immich_url,
-        access_token=token,
-        webhook_url=args.webhook_url,
-        secret=args.webhook_secret,
-        method_info=method_info,
-    )
-    print(f"Ensured workflow '{WIGGLEGRAM_WORKFLOW_NAME}' (id={workflow_id}).")
-
-    upload_burst_fixtures_sequential(
-        args.immich_url,
-        api_key,
-        args.fixtures_dir,
-        delay_seconds=args.upload_delay,
-    )
+    if method_info is not None:
+        workflow_id = ensure_wigglegram_workflow(
+            args.immich_url,
+            access_token=token,
+            webhook_url=args.webhook_url,
+            secret=args.webhook_secret,
+            method_info=method_info,
+        )
+        print(f"Ensured workflow '{WIGGLEGRAM_WORKFLOW_NAME}' (id={workflow_id}).")
+        upload_burst_fixtures_sequential(
+            args.immich_url,
+            api_key,
+            args.fixtures_dir,
+            delay_seconds=args.upload_delay,
+        )
+    else:
+        print(
+            "NOTE: Immich v3-rc has workflows but no outbound webhook step yet. "
+            "Simulating AssetCreate webhooks after each upload."
+        )
+        asset_ids = upload_burst_fixtures_sequential(
+            args.immich_url,
+            api_key,
+            args.fixtures_dir,
+            delay_seconds=0,
+        )
+        for index, asset_id in enumerate(asset_ids):
+            fire_asset_create_webhook(args.simulate_webhook_url, args.webhook_secret, asset_id)
+            if args.upload_delay and index < len(asset_ids) - 1:
+                time.sleep(args.upload_delay)
 
     if not wait_for_wigglegram(
         args.immich_url,

@@ -66,11 +66,14 @@ def probe_workflows(
                     error="Workflows API not found (Immich preview required)",
                 )
             workflows_resp.raise_for_status()
-            webhook = discover_webhook_method(base_url, api_key=api_key, access_token=access_token)
+            webhook_method = None
+            method_info = _discover_webhook_method_from_client(client)
+            if method_info is not None:
+                webhook_method = method_info.method
             return WorkflowProbeResult(
                 available=True,
                 version=version,
-                webhook_method=webhook.method if webhook else None,
+                webhook_method=webhook_method,
             )
     except httpx.HTTPError as exc:
         return WorkflowProbeResult(
@@ -85,7 +88,7 @@ def _iter_method_entries(payload: Any) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     if isinstance(payload, list):
         for item in payload:
-            if isinstance(item, dict) and "method" in item:
+            if isinstance(item, dict) and ("method" in item or "key" in item):
                 entries.append(item)
             elif isinstance(item, dict):
                 entries.extend(_iter_method_entries(item.get("methods", [])))
@@ -99,6 +102,9 @@ def _iter_method_entries(payload: Any) -> list[dict[str, Any]]:
 
 
 def _method_name(entry: dict[str, Any]) -> str:
+    key = entry.get("key")
+    if key:
+        return str(key)
     method = entry.get("method") or entry.get("name") or ""
     plugin = entry.get("plugin") or entry.get("pluginName")
     if plugin and "#" not in method:
@@ -134,6 +140,24 @@ def _pick_headers_key(config_schema: dict[str, Any]) -> str | None:
     return None
 
 
+def _discover_webhook_method_from_client(client: httpx.Client) -> WebhookMethodInfo | None:
+    # Immich v3 exposes plugin methods at /plugins/methods (not /workflows/schema).
+    for path in ("/plugins/methods", "/plugins"):
+        try:
+            response = client.get(path)
+        except httpx.HTTPError:
+            continue
+        if response.status_code in {400, 404}:
+            continue
+        if not response.is_success:
+            continue
+        info = _parse_webhook_method_payload(response.json())
+        if info is not None:
+            logger.info("Discovered webhook method %s from %s", info.method, path)
+            return info
+    return None
+
+
 def discover_webhook_method(
     base_url: str,
     *,
@@ -142,24 +166,8 @@ def discover_webhook_method(
 ) -> WebhookMethodInfo | None:
     base_url = base_url.rstrip("/")
     headers = _auth_headers(api_key=api_key, access_token=access_token)
-    candidate_paths = (
-        "/workflows/schema",
-        "/plugins",
-        "/workflow-plugins",
-    )
-
     with httpx.Client(base_url=base_url, headers=headers, timeout=15.0) as client:
-        for path in candidate_paths:
-            response = client.get(path)
-            if response.status_code == 404:
-                continue
-            response.raise_for_status()
-            info = _parse_webhook_method_payload(response.json())
-            if info is not None:
-                logger.info("Discovered webhook method %s from %s", info.method, path)
-                return info
-
-    return _fallback_webhook_method()
+        return _discover_webhook_method_from_client(client)
 
 
 def _parse_webhook_method_payload(payload: Any) -> WebhookMethodInfo | None:
@@ -167,7 +175,7 @@ def _parse_webhook_method_payload(payload: Any) -> WebhookMethodInfo | None:
         if not _looks_like_webhook_method(entry):
             continue
         method = _method_name(entry)
-        config_schema = entry.get("configSchema") or entry.get("config") or {}
+        config_schema = entry.get("configSchema") or entry.get("schema") or entry.get("config") or {}
         if not isinstance(config_schema, dict):
             config_schema = {}
         url_key = _pick_url_key(config_schema) or "url"
@@ -184,23 +192,13 @@ def _parse_webhook_method_payload(payload: Any) -> WebhookMethodInfo | None:
     return None
 
 
-def _fallback_webhook_method() -> WebhookMethodInfo:
-  # Common preview naming; bootstrap logs when this fallback is used.
-    return WebhookMethodInfo(
-        method="immich-plugin-core#httpWebhook",
-        url_key="url",
-        headers_key="headers",
-        config_template={"url": "", "headers": {}},
-    )
-
-
 def build_wigglegram_workflow(
     webhook_url: str,
     *,
     secret: str | None = None,
-    method_info: WebhookMethodInfo | None = None,
+    method_info: WebhookMethodInfo,
 ) -> dict[str, Any]:
-    info = method_info or _fallback_webhook_method()
+    info = method_info
     config = dict(info.config_template)
     config[info.url_key] = webhook_url
     if secret and info.headers_key:
@@ -251,7 +249,7 @@ def ensure_wigglegram_workflow(
     access_token: str | None = None,
     webhook_url: str,
     secret: str | None = None,
-    method_info: WebhookMethodInfo | None = None,
+    method_info: WebhookMethodInfo,
 ) -> str:
     base_url = base_url.rstrip("/")
     headers = _auth_headers(api_key=api_key, access_token=access_token)
