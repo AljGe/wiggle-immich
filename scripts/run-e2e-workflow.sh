@@ -7,7 +7,7 @@ DOCKER_DIR="$ROOT/docker"
 FIXTURES_DIR="$ROOT/testdata/fixtures"
 RUNTIME_ENV="$DOCKER_DIR/test.runtime.env"
 PYTHON="${PYTHON:-}"
-export IMMICH_VERSION="${IMMICH_WORKFLOW_VERSION:-next}"
+export IMMICH_VERSION="${IMMICH_WORKFLOW_VERSION:-v3-rc}"
 WEBHOOK_SECRET="${WEBHOOK_SECRET:-image-helper-e2e-secret}"
 
 if [[ -z "$PYTHON" ]]; then
@@ -39,6 +39,25 @@ echo "==> Generating synthetic wiggle burst fixtures"
 "$PYTHON" scripts/generate_fixtures.py "$FIXTURES_DIR"
 
 echo "==> Starting Immich test stack (IMMICH_VERSION=${IMMICH_VERSION})"
+for image in "ghcr.io/immich-app/immich-server:${IMMICH_VERSION}" \
+  "ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION}"; do
+  if ! docker manifest inspect "$image" >/dev/null 2>&1; then
+    cat >&2 <<EOF
+ERROR: Immich image not found: ${image}
+
+The tag '${IMMICH_VERSION}' does not exist on GHCR. Valid workflow preview tags include:
+  v3-rc            (recommended; tracks latest v3 release candidate)
+  v3.0.0-rc.2      (pin a specific RC)
+
+Example:
+  IMMICH_WORKFLOW_VERSION=v3-rc ./scripts/run-e2e-workflow.sh
+
+Note: 'next' is not an Immich image tag. REST E2E uses 'release' via ./scripts/run-e2e.sh.
+EOF
+    exit 1
+  fi
+done
+
 if ! docker compose --env-file "$DOCKER_DIR/immich.env" \
   -f "$DOCKER_DIR/compose.test.yml" \
   --project-directory "$DOCKER_DIR" \

@@ -196,11 +196,11 @@ KEEP_STACK=1 ./scripts/run-e2e.sh
 Exercises the full `AssetCreate` workflow → webhook → wigglegram path. Uses a preview Immich tag by default.
 
 ```bash
-# Preview Immich (default: next) + image-helper webhook daemon
+# Preview Immich (default: v3-rc) + image-helper webhook daemon
 ./scripts/run-e2e-workflow.sh
 
-# Pin a specific preview build
-IMMICH_WORKFLOW_VERSION=next ./scripts/run-e2e-workflow.sh
+# Pin a specific release candidate
+IMMICH_WORKFLOW_VERSION=v3.0.0-rc.2 ./scripts/run-e2e-workflow.sh
 
 # Debug workflow method discovery
 WORKFLOW_DEBUG=1 ./scripts/run-e2e-workflow.sh
@@ -208,7 +208,7 @@ WORKFLOW_DEBUG=1 ./scripts/run-e2e-workflow.sh
 
 **What it does:**
 
-1. Starts Immich with `IMMICH_WORKFLOW_VERSION` (default `next`)
+1. Starts Immich with `IMMICH_WORKFLOW_VERSION` (default `v3-rc`)
 2. Starts `image-helper-webhook` (`docker/Dockerfile.webhook`)
 3. `scripts/e2e_workflow_bootstrap.py` — discovers webhook step, installs workflow, uploads fixtures sequentially
 4. Waits for async export and verifies with `scripts/e2e_verify.py`

@@ -271,7 +271,7 @@ def doctor(
     if workflows and not result.get("workflows_available"):
         console.print(
             "[yellow]Workflows API is not available on this Immich build "
-            "(preview/next required).[/yellow]"
+            "(preview/v3-rc required).[/yellow]"
         )
 
     if core_ok:

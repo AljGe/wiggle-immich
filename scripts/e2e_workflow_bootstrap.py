@@ -178,7 +178,7 @@ def main() -> int:
     if not probe.available:
         print(
             "FAIL: Workflows API unavailable. "
-            f"Set IMMICH_WORKFLOW_VERSION to a preview tag (e.g. next). Detail: {probe.error}",
+            f"Set IMMICH_WORKFLOW_VERSION to a preview tag (e.g. v3-rc). Detail: {probe.error}",
             file=sys.stderr,
         )
         return 1
