@@ -1,0 +1,29 @@
+# Production sidecar — runs image-helper daemon alongside an existing Immich stack.
+# Copy docker/.env.example to docker/.env and set IMMICH_URL + IMMICH_API_KEY.
+
+name: image-helper
+
+services:
+  image-helper:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: image_helper_daemon
+    env_file:
+      - .env
+    environment:
+      HASH_DB_PATH: /data/hashes.sqlite3
+    volumes:
+      - helper-data:/data
+    command: ["daemon"]
+    restart: unless-stopped
+    networks:
+      - immich
+
+networks:
+  immich:
+    external: true
+    name: ${IMMICH_DOCKER_NETWORK:-immich_default}
+
+volumes:
+  helper-data:

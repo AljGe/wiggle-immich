@@ -12,19 +12,40 @@ Detection defaults to **dry-run** so you can tune the threshold before uploading
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.11+ (or [uv](https://docs.astral.sh/uv/) for the recommended install path)
 - A running Immich instance (v2 or v3)
 - API key with permissions: `asset.read`, `asset.view`, `asset.download`, `asset.upload`, `album.read`, `album.create`, `albumAsset.create`
 
-## Setup
+## Quick start (local)
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+./scripts/setup.sh
+uv run image-helper doctor
+uv run image-helper index
+uv run image-helper detect
+```
 
-cp .env.example .env
-# Edit .env with your Immich URL and API key
+`setup.sh` runs `uv sync`, creates `.env` from `.env.example` when needed, and prints next steps. For dev dependencies (pytest):
+
+```bash
+DEV=1 ./scripts/setup.sh
+```
+
+### Manual install (without setup.sh)
+
+```bash
+uv sync
+uv run image-helper config init
+uv run image-helper doctor
+```
+
+**pip fallback** (no uv):
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+cp .env.example .env   # edit IMMICH_URL and IMMICH_API_KEY
+image-helper doctor
 ```
 
 ## Usage
@@ -48,10 +69,29 @@ image-helper daemon
 
 ## Configuration
 
+Settings are loaded with this precedence:
+
+1. **Shell environment variables** — always override file values
+2. **Env file** — first existing file wins: `--env-file` → `IMAGE_HELPER_ENV_FILE` → `./.env` → `~/.config/image-helper/env`
+3. **Built-in defaults**
+
+Inspect effective values at any time:
+
+```bash
+image-helper config show
+```
+
+Initialize or reset your env file:
+
+```bash
+image-helper config init
+image-helper config init --output ~/.config/image-helper/env
+```
+
 | Variable | Default | Description |
 |---|---|---|
 | `IMMICH_URL` | `http://localhost:2283/api` | Immich API base URL |
-| `IMMICH_API_KEY` | — | API key |
+| `IMMICH_API_KEY` | — | API key (required) |
 | `HASH_DB_PATH` | `./data/hashes.sqlite3` | SQLite hash cache |
 | `WIGGLE_THRESHOLD` | `10` | Max phash distance for grouping |
 | `WIGGLE_TIME_WINDOW_SECONDS` | `3.0` | Max seconds between adjacent frames |
@@ -59,6 +99,51 @@ image-helper daemon
 | `WIGGLE_MAX_SIZE` | `600` | Max GIF frame dimension |
 | `WIGGLE_BOOMERANG` | `true` | Reverse playback in GIF |
 | `WIGGLE_ALBUM_NAME` | `Wigglegrams` | Target album for exports |
+| `DAEMON_POLL_INTERVAL_SECONDS` | `60` | Daemon poll interval |
+| `WEBHOOK_HOST` | `0.0.0.0` | Webhook bind address |
+| `WEBHOOK_PORT` | `8765` | Webhook port |
+| `WEBHOOK_SECRET` | — | Optional webhook auth header |
+| `DEVICE_ID` | `image-helper` | Upload device id |
+
+Verify connectivity before indexing:
+
+```bash
+image-helper doctor
+```
+
+## Docker sidecar
+
+Run the daemon alongside an existing Immich Docker Compose stack:
+
+```bash
+cp docker/.env.example docker/.env
+# Edit IMMICH_URL and IMMICH_API_KEY
+```
+
+**Same Docker network as Immich** (most common):
+
+```dotenv
+IMMICH_URL=http://immich-server:2283/api
+IMMICH_DOCKER_NETWORK=immich_default
+```
+
+Find your Immich network name with `docker network ls` (often `<project>_default`).
+
+**Immich on the Docker host** (helper in a container, Immich on localhost):
+
+```dotenv
+IMMICH_URL=http://host.docker.internal:2283/api
+```
+
+On Linux you may need `extra_hosts: ["host.docker.internal:host-gateway"]` on the service.
+
+Start the sidecar:
+
+```bash
+docker compose -f docker/compose.yml --project-directory docker up -d --build
+```
+
+Hash data persists in the `helper-data` volume.
 
 ## Threshold tuning
 
@@ -72,12 +157,11 @@ image-helper daemon
 ### Fast unit tests (no Docker)
 
 ```bash
-uv venv .venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
-pytest
+uv sync --group dev
+uv run pytest
 ```
 
-These cover detector logic (phash grouping, time-window guard) without Immich.
+These cover detector logic, configuration, and doctor checks without Immich.
 
 ### Full contained E2E (Docker + Immich)
 
@@ -128,7 +212,7 @@ Test data is stored under `docker/test-data/` and removed on teardown (`docker c
 When Immich merges the webhook workflow step, enable the receiver:
 
 ```bash
-pip install -e ".[webhook]"
+uv sync --extra webhook
 image-helper webhook
 ```
 

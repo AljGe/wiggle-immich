@@ -1,12 +1,111 @@
-from pathlib import Path
+from __future__ import annotations
 
-from pydantic import Field
+import os
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+SECRET_FIELDS = frozenset({"immich_api_key", "webhook_secret"})
+SettingSource = Literal["default", "env", "file"]
+
+
+class SettingsLoadError(Exception):
+    """Raised when settings cannot be loaded from the environment."""
+
+    def __init__(self, error: ValidationError) -> None:
+        self.error = error
+        missing = [
+            err["loc"][0]
+            for err in error.errors()
+            if err["type"] == "missing"
+        ]
+        self.missing_fields = missing
+        super().__init__(format_settings_error(error))
+
+
+def xdg_config_env_path() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / "image-helper" / "env"
+    return Path.home() / ".config" / "image-helper" / "env"
+
+
+def default_env_file_path() -> Path:
+    return Path(".env")
+
+
+def resolve_env_file(explicit: Path | None = None) -> Path | None:
+    if explicit is not None:
+        path = explicit.expanduser()
+        return path if path.is_file() else path
+
+    env_var = os.environ.get("IMAGE_HELPER_ENV_FILE")
+    if env_var:
+        path = Path(env_var).expanduser()
+        if path.is_file():
+            return path
+
+    cwd_env = Path(".env")
+    if cwd_env.is_file():
+        return cwd_env
+
+    xdg_env = xdg_config_env_path()
+    if xdg_env.is_file():
+        return xdg_env
+
+    return None
+
+
+def discover_env_file_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    env_var = os.environ.get("IMAGE_HELPER_ENV_FILE")
+    if env_var:
+        candidates.append(Path(env_var).expanduser())
+    candidates.append(Path(".env"))
+    candidates.append(xdg_config_env_path())
+    return candidates
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def format_settings_error(error: ValidationError) -> str:
+    lines = ["Configuration error:"]
+    for err in error.errors():
+        field = ".".join(str(part) for part in err["loc"])
+        if err["type"] == "missing":
+            lines.append(f"  - {field} is required")
+        else:
+            lines.append(f"  - {field}: {err['msg']}")
+
+    lines.extend(
+        [
+            "",
+            "Fix:",
+            "  image-helper config init",
+            "  # or copy .env.example to .env and edit IMMICH_URL / IMMICH_API_KEY",
+        ]
+    )
+    return "\n".join(lines)
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -34,3 +133,63 @@ class Settings(BaseSettings):
     @property
     def immich_base_url(self) -> str:
         return self.immich_url.rstrip("/")
+
+
+def load_settings(env_file: Path | None = None) -> Settings:
+    resolved = resolve_env_file(env_file)
+    try:
+        if resolved is not None and resolved.is_file():
+            return Settings(_env_file=resolved)
+        return Settings()
+    except ValidationError as exc:
+        raise SettingsLoadError(exc) from exc
+
+
+def redact_value(field_name: str, value: Any) -> str:
+    if field_name in SECRET_FIELDS and value:
+        return "********"
+    if value is None:
+        return ""
+    return str(value)
+
+
+def describe_settings(
+    settings: Settings | None = None,
+    *,
+    env_file: Path | None = None,
+) -> list[dict[str, str]]:
+    resolved = resolve_env_file(env_file)
+    file_values = parse_env_file(resolved) if resolved and resolved.is_file() else {}
+    if settings is None:
+        settings = load_settings(env_file)
+
+    rows: list[dict[str, str]] = []
+    for field_name, field_info in Settings.model_fields.items():
+        alias = field_info.alias or field_name.upper()
+        value = getattr(settings, field_name)
+        if alias in os.environ:
+            source: SettingSource = "env"
+        elif alias in file_values:
+            source = "file"
+        else:
+            source = "default"
+
+        rows.append(
+            {
+                "name": alias,
+                "value": redact_value(field_name, value),
+                "source": source,
+            }
+        )
+    return rows
+
+
+def find_env_example() -> Path | None:
+    candidates = [
+        Path(".env.example"),
+        Path(__file__).resolve().parent.parent / ".env.example",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None

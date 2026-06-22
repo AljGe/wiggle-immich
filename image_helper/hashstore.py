@@ -21,6 +21,8 @@ class HashStore:
 
     def _init_db(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS asset_hashes (
@@ -58,9 +60,25 @@ class HashStore:
             conn.close()
 
     def upsert(self, record: AssetRecord) -> None:
+        self.upsert_many([record])
+
+    def upsert_many(self, records: list[AssetRecord]) -> None:
+        if not records:
+            return
+
         now = _utc_now_iso()
+        rows = [
+            (
+                record.asset_id,
+                record.phash,
+                record.local_datetime.isoformat(),
+                record.checksum,
+                now,
+            )
+            for record in records
+        ]
         with self._transaction() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO asset_hashes (asset_id, phash, local_datetime, checksum, indexed_at)
                 VALUES (?, ?, ?, ?, ?)
@@ -70,13 +88,7 @@ class HashStore:
                   checksum = excluded.checksum,
                   indexed_at = excluded.indexed_at
                 """,
-                (
-                    record.asset_id,
-                    record.phash,
-                    record.local_datetime.isoformat(),
-                    record.checksum,
-                    now,
-                ),
+                rows,
             )
 
     def get(self, asset_id: str) -> AssetRecord | None:

@@ -17,6 +17,33 @@ class ExportSummary:
     errors: int = 0
 
 
+INDEX_BATCH_SIZE = 50
+
+
+def prepare_index_record(
+    client: ImmichClient,
+    store: HashStore,
+    asset: dict,
+    *,
+    force: bool = False,
+) -> AssetRecord | None:
+    asset_id = asset["id"]
+    checksum = asset.get("checksum")
+    existing = store.get(asset_id)
+
+    if existing and not force:
+        if checksum and existing.checksum == checksum:
+            return None
+
+    phash = client.hash_asset_thumbnail(asset_id)
+    return AssetRecord(
+        asset_id=asset_id,
+        phash=phash,
+        local_datetime=parse_local_datetime(asset["localDateTime"]),
+        checksum=checksum,
+    )
+
+
 def index_asset(
     client: ImmichClient,
     store: HashStore,
@@ -24,23 +51,20 @@ def index_asset(
     *,
     force: bool = False,
 ) -> bool:
-    asset_id = asset["id"]
-    checksum = asset.get("checksum")
-    existing = store.get(asset_id)
-
-    if existing and not force:
-        if checksum and existing.checksum == checksum:
-            return False
-
-    phash = client.hash_asset_thumbnail(asset_id)
-    record = AssetRecord(
-        asset_id=asset_id,
-        phash=phash,
-        local_datetime=parse_local_datetime(asset["localDateTime"]),
-        checksum=checksum,
-    )
+    record = prepare_index_record(client, store, asset, force=force)
+    if record is None:
+        return False
     store.upsert(record)
     return True
+
+
+def flush_index_batch(store: HashStore, batch: list[AssetRecord]) -> int:
+    if not batch:
+        return 0
+    store.upsert_many(batch)
+    count = len(batch)
+    batch.clear()
+    return count
 
 
 def detect_groups(settings: Settings, store: HashStore) -> list[WiggleGroup]:
