@@ -1,4 +1,4 @@
-# image-helper
+# wiggle4immich
 
 External helper for Immich that detects stereoscopic wiggle sequences (burst-like near-duplicate frames) and exports animated GIF wigglegrams back into your library.
 
