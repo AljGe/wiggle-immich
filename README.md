@@ -109,6 +109,12 @@ image-helper config init --output ~/.config/image-helper/env
 | `WIGGLE_SETTLE_SECONDS` | `0` | Wait after last detection before export (burst upload debounce; `0` = off) |
 | `WIGGLE_REQUIRE_BURST_METADATA` | `false` | Require matching EXIF burst UUID on every frame |
 | `WIGGLE_STACK_WITH_SOURCES` | `false` | Stack exported GIF with source frames in Immich |
+| `WIGGLE_STABILIZE` | `true` | Enable frame stabilization during GIF export |
+| `WIGGLE_STABILIZE_MODE` | `auto` | Stabilization mode (`auto`, `rigid`, `translate`, `horizontal`, `off`) |
+| `WIGGLE_STABILIZE_REFERENCE` | `middle` | Reference frame for alignment (`first` or `middle`) |
+| `WIGGLE_STABILIZE_CROP` | `true` | Crop to shared overlap after alignment |
+| `WIGGLE_STABILIZE_MAX_ROTATION_DEG` | `3.0` | Reject alignment estimates above this rotation |
+| `WIGGLE_STABILIZE_WORKING_MAX_EDGE` | `1024` | Resolution used for transform estimation |
 | `INDEX_WORKERS` | `4` | Parallel workers for index hashing (`1` = sequential) |
 | `WIGGLE_ALBUM_NAME` | `Wigglegrams` | Target album for exports |
 | `DAEMON_POLL_INTERVAL_SECONDS` | `60` | Daemon poll interval |
@@ -169,6 +175,25 @@ For the Docker sidecar, `docker/.env.example` recommends `WIGGLE_HASH_SOURCE=thu
 6. Lower `WIGGLE_MAX_DIMENSION_DRIFT` if unstacked crop edits slip through.
 7. Adjust `WIGGLE_TIME_WINDOW_SECONDS` if unrelated photos get grouped.
 8. Raise `WIGGLE_MAX_GAP_FRAMES` if an unrelated frame splits a burst in time order.
+
+### Stabilization tuning
+
+Stabilization runs during GIF export (enabled by default). Preview a group locally to compare modes:
+
+```bash
+WIGGLE_STABILIZE_MODE=off image-helper detect preview -o /tmp/raw.gif --group-index 0
+WIGGLE_STABILIZE_MODE=auto image-helper detect preview -o /tmp/stable.gif --group-index 0
+```
+
+| Mode | Behavior |
+|---|---|
+| `auto` (default) | Corrects vertical shake + rotation, anchors median depth plane, preserves horizontal parallax |
+| `rigid` | Full similarity alignment to the reference frame |
+| `translate` | Translation-only alignment |
+| `horizontal` | Horizontal registration only |
+| `off` | No stabilization (legacy behavior) |
+
+If exports crop too aggressively, set `WIGGLE_STABILIZE_CROP=false`. If the 3D wiggle looks flattened, try `WIGGLE_STABILIZE_MODE=translate` or `horizontal`.
 
 After upgrading image-helper with new metadata fields, re-index once:
 

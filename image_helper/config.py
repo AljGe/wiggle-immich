@@ -150,6 +150,24 @@ class Settings(BaseSettings):
         default=False,
         alias="WIGGLE_STACK_WITH_SOURCES",
     )
+    wiggle_stabilize: bool = Field(default=True, alias="WIGGLE_STABILIZE")
+    wiggle_stabilize_mode: Literal["auto", "rigid", "translate", "horizontal", "off"] = Field(
+        default="auto",
+        alias="WIGGLE_STABILIZE_MODE",
+    )
+    wiggle_stabilize_reference: Literal["first", "middle"] = Field(
+        default="middle",
+        alias="WIGGLE_STABILIZE_REFERENCE",
+    )
+    wiggle_stabilize_crop: bool = Field(default=True, alias="WIGGLE_STABILIZE_CROP")
+    wiggle_stabilize_max_rotation_deg: float = Field(
+        default=3.0,
+        alias="WIGGLE_STABILIZE_MAX_ROTATION_DEG",
+    )
+    wiggle_stabilize_working_max_edge: int = Field(
+        default=1024,
+        alias="WIGGLE_STABILIZE_WORKING_MAX_EDGE",
+    )
     index_workers: int = Field(default=4, alias="INDEX_WORKERS")
 
     daemon_poll_interval_seconds: int = Field(default=60, alias="DAEMON_POLL_INTERVAL_SECONDS")

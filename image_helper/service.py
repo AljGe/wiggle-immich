@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from image_helper.asset_metadata import extract_asset_metadata
 from image_helper.config import Settings
 from image_helper.detector import find_wiggle_groups
-from image_helper.exporter import export_wiggle_group, make_wigglegram_bytes
+from image_helper.exporter import StabilizeOptions, export_wiggle_group, make_wigglegram_bytes
 from image_helper.group_validation import RejectedWiggleGroup, partition_wiggle_groups
 from image_helper.hashstore import HashStore, dimensions_from_image_bytes
 from image_helper.immich import ImmichClient, ImmichError, parse_local_datetime
@@ -433,6 +433,20 @@ def run_daemon_detection(
     return detect_groups_for_centers(settings, store, centers)
 
 
+def stabilize_options_from_settings(settings: Settings) -> StabilizeOptions:
+    mode = settings.wiggle_stabilize_mode
+    if not settings.wiggle_stabilize:
+        mode = "off"
+    return StabilizeOptions(
+        enabled=settings.wiggle_stabilize,
+        mode=mode,
+        reference=settings.wiggle_stabilize_reference,
+        crop_to_overlap=settings.wiggle_stabilize_crop,
+        max_rotation_deg=settings.wiggle_stabilize_max_rotation_deg,
+        working_max_edge=settings.wiggle_stabilize_working_max_edge,
+    )
+
+
 def preview_wiggle_group(
     settings: Settings,
     store: HashStore,
@@ -448,6 +462,7 @@ def preview_wiggle_group(
             max_size=settings.wiggle_max_size,
             boomerang=settings.wiggle_boomerang,
             frame_fit=settings.wiggle_frame_fit,
+            stabilize=stabilize_options_from_settings(settings),
         )
     output_path.write_bytes(gif_bytes)
 
@@ -479,6 +494,7 @@ def export_groups(
                     boomerang=settings.wiggle_boomerang,
                     device_id=settings.device_id,
                     frame_fit=settings.wiggle_frame_fit,
+                    stabilize=stabilize_options_from_settings(settings),
                 )
                 gif_asset_id = uploaded.get("id")
                 if not gif_asset_id:
